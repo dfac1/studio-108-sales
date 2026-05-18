@@ -1,0 +1,50 @@
+# Fly.io конфиг для Studio 108 voice-sales.
+# Минимальный VM (бесплатно) + persistent volume для логов/кэша.
+# Регион fra (Франкфурт) — низкая латентность из РФ.
+
+app = "studio-108-sales"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "3108"
+  NODE_ENV = "production"
+
+# Persistent volume для логов разговоров, броней, TTS-кэша.
+# Без volume всё это теряется при каждом рестарте — а мы не хотим терять
+# историю клиентов и пересинтезировать сэмплы заново.
+[mounts]
+  source = "sales_data"
+  destination = "/app/data"
+
+[http_service]
+  internal_port = 3108
+  force_https = true
+  auto_stop_machines = "off"   # 24/7, не усыпляем — холодный старт = 30+ сек
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+# Healthcheck — Fly периодически дёргает /health.
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512   # 512 MB — даёт запас на пиках; 256 хватает, но Anthropic+TTS могут спайкнуть
+
+[processes]
+  app = "node dist/server.js"

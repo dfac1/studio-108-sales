@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Studio 108 Voice Sales</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-label="Тест входящей заявки">
+        <div class="lead-panel">
+          <header class="panel-header">
+            <div>
+              <p class="eyebrow">Studio 108</p>
+              <h1>Запись на пробное</h1>
+            </div>
+            <span class="status-pill" id="serverStatus">Проверка</span>
+          </header>
+
+          <form id="leadForm" class="lead-form">
+            <label>
+              STT провайдер
+              <select name="sttProvider">
+                <option value="elevenlabs">ElevenLabs Scribe</option>
+                <option value="yandex">Yandex SpeechKit</option>
+              </select>
+            </label>
+
+            <label>
+              TTS провайдер
+              <select name="ttsProvider">
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="yandex">Yandex SpeechKit</option>
+              </select>
+            </label>
+
+            <label>
+              Имя
+              <input name="customerName" autocomplete="name" placeholder="Анна" />
+            </label>
+
+            <label>
+              Телефон
+              <input name="phone" autocomplete="tel" placeholder="+7 999 000-00-00" />
+            </label>
+
+            <label>
+              Возраст
+              <input name="age" inputmode="numeric" placeholder="5" />
+            </label>
+
+            <label>
+              Направление
+              <select name="direction">
+                <option value="">Не выбрано</option>
+                <option>Hip-hop</option>
+                <option>Breakdance</option>
+                <option>Contemporary</option>
+                <option>Йога</option>
+                <option>Zumba</option>
+                <option>Lady style</option>
+                <option>Восточные танцы</option>
+                <option>Jazz funk</option>
+                <option>K-pop</option>
+                <option>Salsa/Bachata</option>
+                <option>Стрип-пластика</option>
+                <option>Детская хореография</option>
+              </select>
+            </label>
+
+            <label>
+              Филиал
+              <select name="branch">
+                <option value="">Не выбран</option>
+                <option>Развилка</option>
+                <option>Озеро</option>
+                <option>Школьная</option>
+                <option>Черняховского</option>
+              </select>
+            </label>
+
+            <div class="consents" aria-label="Согласия">
+              <label class="check-row">
+                <input name="aiVoiceDisclosure" type="checkbox" checked />
+                Служебный флаг теста: сценарий автоматизирован
+              </label>
+              <label class="check-row">
+                <input name="personalData" type="checkbox" />
+                Согласие на обработку данных для записи
+              </label>
+              <label class="check-row">
+                <input name="crossBorderTransfer" type="checkbox" />
+                Согласие/основание для ElevenLabs
+              </label>
+            </div>
+          </form>
+        </div>
+
+        <div class="conversation-panel">
+          <div class="assistant-bar">
+            <div>
+              <p class="eyebrow">Тест диалога</p>
+              <h2>Менеджер Studio 108</h2>
+            </div>
+            <div class="bar-actions">
+              <button class="ghost-button primary" id="liveButton" type="button">🎙 Начать разговор</button>
+              <button class="ghost-button" id="speakButton" type="button">Озвучить</button>
+              <button class="ghost-button" id="resetButton" type="button">Сброс</button>
+            </div>
+          </div>
+
+          <div class="live-status" id="liveStatus" hidden>
+            <span class="live-dot" id="liveDot"></span>
+            <span class="live-text" id="liveText">Готов слушать</span>
+            <div class="level-meter" aria-hidden="true"><div class="level-fill" id="levelFill"></div></div>
+          </div>
+
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <audio id="audioPlayer" controls hidden></audio>
+
+          <form class="prompt-row" id="promptForm">
+            <textarea id="transcriptInput" rows="2" placeholder="Здравствуйте, меня зовут Анна, хочу записать ребенка 5 лет на хип-хоп на Развилке"></textarea>
+            <button type="submit">Ответить</button>
+          </form>
+        </div>
+
+        <aside class="result-panel">
+          <header class="panel-header compact">
+            <div>
+              <p class="eyebrow">Варианты</p>
+              <h2>Слоты</h2>
+            </div>
+          </header>
+          <div id="slotList" class="slot-list"></div>
+          <div id="bookingBox" class="booking-box"></div>
+        </aside>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

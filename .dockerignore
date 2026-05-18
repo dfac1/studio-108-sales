@@ -1,0 +1,46 @@
+# Тяжёлое / лишнее в образе.
+node_modules
+dist
+
+# Локальные данные — не нужны в образе, должны жить в persistent volume на Fly.
+data/*.jsonl
+data/tts-cache/
+data/call-analysis/inbox/
+data/call-analysis/work/
+data/call-analysis/reports/
+data/call-analysis/archive/
+data/slot-availability.json
+data/conversations.jsonl
+data/bookings.jsonl
+data/handoffs.jsonl
+data/reminders.jsonl
+data/variant-picks.jsonl
+data/nastya-test.mp3
+
+# Секреты.
+.env
+.env.*
+
+# Логи и временные.
+server.out.log
+server.err.log
+npm-debug.log*
+*.log
+
+# IDE.
+.vscode
+.idea
+.DS_Store
+
+# Git.
+.git
+.gitignore
+
+# Документация — не нужна в образе.
+*.md
+docs
+
+# Тесты (включая dist-test.js).
+**/*.test.ts
+**/*.test.js
+scripts

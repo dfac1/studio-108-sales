@@ -1,0 +1,38 @@
+# Render Blueprint — описание сервиса, которое Render подхватывает при создании.
+# Можно создать сервис и через UI вручную, но с этим файлом всё автоматизировано.
+services:
+  - type: web
+    name: studio-108-sales
+    runtime: docker
+    plan: free
+    region: frankfurt    # ближайший free регион к РФ; альтернативы: oregon, singapore, ohio, virginia
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true     # на каждый push в main триггерит деплой
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      # PORT Render задаёт сам (~10000). Наш config.ts его читает.
+      # Секреты ниже задаёшь в Render UI вручную (envVars без value).
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ELEVENLABS_MODEL_ID
+        sync: false
+      - key: ELEVENLABS_STT_MODEL_ID
+        sync: false
+      - key: ELEVENLABS_OUTPUT_FORMAT
+        sync: false
+      - key: ANTHROPIC_DIALOG_MODEL
+        sync: false
+      - key: ANTHROPIC_EXTRACTION_MODEL
+        sync: false
+      - key: ADMINS_JSON
+        sync: false
+      - key: ASSISTANT_NAME
+        sync: false

@@ -1,0 +1,11 @@
+{
+  "externalId": "crm-0001",
+  "callStartedAt": "2026-05-05T14:10:00+03:00",
+  "channel": "inbound_call",
+  "callerPhoneMasked": "+7***1234567",
+  "managerName": "Анна",
+  "branchHint": "Развилка",
+  "directionHint": "Hip-hop",
+  "outcomeHint": "unknown",
+  "notes": "Короткий комментарий по звонку"
+}

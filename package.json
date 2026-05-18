@@ -1,0 +1,36 @@
+{
+  "name": "studio-108-voice-sales",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run src",
+    "test:all": "vitest run src && tsx scripts/dialog-test-pack.ts",
+    "dialog:smoke": "tsx scripts/dialog-smoke.ts",
+    "dialog:pack": "tsx scripts/dialog-test-pack.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cost:model": "tsx scripts/call-cost-scenarios.ts",
+    "cost:from-log": "tsx scripts/cost-from-log.ts",
+    "reminders:dispatch": "tsx scripts/reminders-dispatch.ts",
+    "calls:prepare": "tsx scripts/prepare-call-analysis.ts",
+    "calls:transcribe": "tsx scripts/transcribe-call-batch.ts",
+    "calls:review": "tsx scripts/review-call-batch.ts",
+    "qa:digest": "tsx scripts/daily-qa-digest.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@fastify/static": "^9.1.3",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.2",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  }
+}
