@@ -1490,21 +1490,19 @@ async function humanizeSalesReply(input: {
   slots?: Slot[];
   context?: ReplyContext;
 }): Promise<{ reply: string; source: string; cacheUsage?: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number } }> {
-  // Если клиент задал уточняющий вопрос (например, спросил адрес/цену), даже на простом шаге
-  // brain нужен, чтобы естественно ответить + развернуть к шагу. Без вопроса — фолбэк.
-  // Также: если клиент только что приветствовал или дал инициативу — нужен brain.
+  // ЖЁСТКИЙ режим: brain включается ТОЛЬКО когда клиент дал явный сигнал, требующий
+  // нешаблонной реакции — задал вопрос, выразил возражение, попросил инициативу,
+  // или спросил конкретный факт (цену/адрес/преподавателя). На стандартных ходах
+  // FSM-fallback используется как есть. Это убирает класс багов «brain выдумал факт»
+  // (фитнес, классика, две опции сразу и т.п.) — потому что brain просто не вызывается.
   const msg = input.customerMessage.toLowerCase();
   const customerAskedSomething = /\?/.test(input.customerMessage) || isClarifyingUserQuestion(input.customerMessage);
-  const customerJustGreeted = /(привет|здравствуй|здрасте|здрасьте|доброе утро|добрый день|добрый вечер|хай)/i.test(msg);
   const customerGivesInitiative = CLIENT_GIVES_INITIATIVE.test(msg);
-  if (
-    isFlagOn("humanizationSkipSimpleSteps") &&
-    SIMPLE_ACTIONS_NO_BRAIN.has(input.action) &&
-    !customerAskedSomething &&
-    !customerJustGreeted &&
-    !customerGivesInitiative
-  ) {
-    return { reply: input.fallbackReply, source: "skip_brain_simple_action" };
+  const customerObjected = /(?:не\s+(?:очень\s+|особо\s+|совсем\s+|сильно\s+|шибко\s+)?(?:хоч|нрав|подход|интересн|пойд(?:ет|ёт))|не\s+(?:для\s+нас|моё|мое)|подумаю|подумать|сомнева|дорог|дешев|пока\s+не|не\s+уверен)/i.test(msg);
+  const customerAskedSpecific = isPriceQuestion(msg) || isAddressQuestion(msg) || isTeacherQuestion(msg);
+  const brainNeeded = customerAskedSomething || customerGivesInitiative || customerObjected || customerAskedSpecific;
+  if (!brainNeeded) {
+    return { reply: input.fallbackReply, source: "skip_brain_no_signal" };
   }
 
   const brain = await generateSalesReply({
