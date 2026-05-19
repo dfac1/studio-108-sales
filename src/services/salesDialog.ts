@@ -2366,8 +2366,33 @@ async function mergeExtractedFields(state: SalesDialogState, lower: string, orig
   }
 }
 
+// Чистит кандидата на имя: убирает хвостовые дефисы (обрыв слова — "Ан--"),
+// отбрасывает слишком короткие и filler-токены ("э-э", "м-м").
+function sanitizeNameCandidate(raw: string): string | undefined {
+  const cleaned = raw.replace(/-+$/u, "").trim();
+  if (cleaned.length < 2) return undefined;
+  if (isLikelyFiller(cleaned)) return undefined;
+  // Имя, заканчивающееся согласной без гласной (как "Бр" из "Брайан--") — скорее обрыв.
+  // Простая эвристика: должна быть хоть одна гласная.
+  if (!/[аеёиоуыэюяa-z]/iu.test(cleaned)) return undefined;
+  return cleaned;
+}
+
 function extractName(original: string, stage?: string): string | undefined {
   const trimmed = original.trim();
+
+  // Самокоррекция клиента: «Ан-- э-э-э, Татьяна», «Сергей, ой нет, Андрей»,
+  // «Аня, точнее Анна» — берём ПОСЛЕДНЕЕ имя после маркера поправки.
+  // Маркеры: filler (а-а, э-э, м-м), «ой», «нет», «точнее», «то есть», «не», обрыв тире.
+  // Это надо проверить ДО общих паттернов, иначе они захватят первое (обрыванное) имя.
+  const correction = trimmed.match(
+    /[А-ЯЁ][а-яё]+(?:-+)?\s*[,.]?\s+(?:[аэом]+(?:[-\s]?[аэом]+)+|ой|нет|точнее|то\s+есть|не|извините|простите)\s*[,.]?\s+([А-ЯЁ][а-яё]+)/u
+  );
+  if (correction?.[1]) {
+    const sanitized = sanitizeNameCandidate(correction[1]);
+    if (sanitized && !isNotAName(sanitized)) return sanitized;
+  }
+
   // "это" специально НЕ включён в pattern представления — он часто появляется в вопросах
   // «Это где?», «Это что?», «Это сколько?», и захватывал вопросительное слово как имя.
   // Если клиент действительно говорит «Это Андрей», то pattern с "я" / "меня зовут" обычно тоже сработает.
@@ -2378,20 +2403,19 @@ function extractName(original: string, stage?: string): string | undefined {
   ];
 
   for (const pattern of explicitPatterns) {
-    const match = trimmed.match(pattern)?.[1];
-    if (match && !isNotAName(match)) {
-      return match;
-    }
+    const raw = trimmed.match(pattern)?.[1];
+    const sanitized = raw ? sanitizeNameCandidate(raw) : undefined;
+    if (sanitized && !isNotAName(sanitized)) return sanitized;
   }
 
-  const afterGreeting = trimmed.match(/^(?:здравствуйте|здрасьте|добрый день|добрый вечер|доброго времени суток|привет)[,!.\s-]+([А-ЯЁа-яёA-Za-z-]{2,})(?=[\s,.!?]|$)/i)?.[1];
+  const afterGreetingRaw = trimmed.match(/^(?:здравствуйте|здрасьте|добрый день|добрый вечер|доброго времени суток|привет)[,!.\s-]+([А-ЯЁа-яёA-Za-z-]{2,})(?=[\s,.!?]|$)/i)?.[1];
+  const afterGreeting = afterGreetingRaw ? sanitizeNameCandidate(afterGreetingRaw) : undefined;
   if (afterGreeting && !isGreetingWord(afterGreeting) && !isNotAName(afterGreeting)) return afterGreeting;
 
   if (stage === "ask_name") {
-    const firstToken = trimmed.match(/^([А-ЯЁа-яёA-Za-z-]{2,})(?=[\s,.!?]|$)/)?.[1];
-    if (firstToken && !isGreetingWord(firstToken) && !isNotAName(firstToken)) {
-      return firstToken;
-    }
+    const firstTokenRaw = trimmed.match(/^([А-ЯЁа-яёA-Za-z-]{2,})(?=[\s,.!?]|$)/)?.[1];
+    const firstToken = firstTokenRaw ? sanitizeNameCandidate(firstTokenRaw) : undefined;
+    if (firstToken && !isGreetingWord(firstToken) && !isNotAName(firstToken)) return firstToken;
   }
 
   return undefined;
