@@ -78,12 +78,14 @@ describe("Studio 108 sales rules", () => {
     expect(greeting.action).toBe("ask_name");
     expect(greeting.reply).not.toContain("AI");
     expect((await step("Меня зовут Анна")).action).toBe("ask_learner");
-    // Бот теперь объявляет предложенное direction и просит подтвердить (ask_direction_confirm),
-    // вместо того чтобы молча выбрать и переходить дальше. Это UX-фикс — клиент не должен
-    // обнаруживать, что его записывают на хип-хоп, без явного подтверждения.
-    expect((await step("Хочу для ребенка, чтобы раскрепостился и ему понравились танцы")).action).toBe("ask_direction_confirm");
-    // Возраст пришёл — это implicit accept предложенного direction.
-    expect((await step("5 лет")).action).toBe("ask_branch");
+    // Для ребёнка без указанного возраста бот СНАЧАЛА спрашивает возраст — иначе
+    // фразы вроде «для этого возраста...» произносятся без знания возраста, и могут
+    // быть предложены направления, не подходящие по возрасту.
+    expect((await step("Хочу для ребенка, чтобы раскрепостился и ему понравились танцы")).action).toBe("ask_age");
+    // Возраст пришёл — теперь бот подбирает direction и просит подтвердить.
+    expect((await step("5 лет")).action).toBe("ask_direction_confirm");
+    // Явное подтверждение направления → переход к филиалу.
+    expect((await step("Да")).action).toBe("ask_branch");
     expect((await step("Развилка")).action).toBe("offer_solution");
     expect((await step("Первый вариант подходит")).action).toBe("ask_phone");
     expect((await step("+79990000002")).action).toBe("ask_consent");

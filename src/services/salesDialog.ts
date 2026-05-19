@@ -376,7 +376,8 @@ function suggestPopularDirection(state: SalesDialogState): { direction: string; 
   const pool: Array<{ direction: string; pitch: string }> = [];
 
   if (state.learnerType === "child") {
-    pool.push({ direction: "Hip-hop",            pitch: "Для этого возраста сейчас популярен хип-хоп — ритмичный, понятный, подходит большинству." });
+    const ageWord = state.age ? `Для ${state.age} лет ` : "Для детей ";
+    pool.push({ direction: "Hip-hop",            pitch: `${ageWord}сейчас популярен хип-хоп — ритмичный, понятный, подходит большинству.` });
     pool.push({ direction: "Breakdance",         pitch: "Если ребёнок активный — отлично заходит брейкданс: силовой и динамичный." });
     pool.push({ direction: "Contemporary",       pitch: "Для плавных движений хорошо подходит контемп — там учатся выражать эмоции через движение." });
     pool.push({ direction: "Lady style",         pitch: "Для подростков, которым ближе женственный формат, отлично подходит леди стайл — плавная пластика и красивые связки." });
@@ -1049,6 +1050,34 @@ export async function handleSalesDialog(input: SalesDialogInput): Promise<SalesD
   }
 
   // (ask_direction_confirm handler перенесён выше — после ask_learner check)
+
+  // Для ребёнка с неизвестным возрастом — сначала возраст, потом направление.
+  // Иначе бот предлагает «для этого возраста хорошо заходит хип-хоп...» когда возраста
+  // вообще не знает, и может посоветовать направление, не подходящее по возрасту
+  // (Lady style для 4-летнего, например). Исключение: клиент прямо назвал направление —
+  // тогда возраст спросим позже на стадии needsAge.
+  if (
+    state.learnerType === "child" &&
+    !state.age &&
+    !state.direction &&
+    !isDirectionMentionedExplicitly(text) &&
+    !isDirectionMentionedExplicitly(state.need ?? "")
+  ) {
+    return ask("ask_age", variants.askAgeChild(state.customerName, state.childGender), state);
+  }
+
+  // Возраст ребёнка <4 — основные детские группы не подходят, передаём администратору.
+  // Проверяем ЗДЕСЬ (а не позже после set'а direction), чтобы пути silent-set + ask_branch
+  // не обходили handoff. Раньше handoff фиксировался только когда implicit-accept на возраст
+  // в ask_direction_confirm handler устанавливал direction. С новой логикой ask_age-first
+  // путь идёт через recentAskNeed → suggestPopularDirection → ask_branch напрямую.
+  if (isChildLead(state) && state.age && state.age < 4) {
+    return ask(
+      "handoff",
+      `${state.customerName ? `${state.customerName}, ` : ""}основные детские группы у нас стартуют примерно с 4 лет, поэтому для такого возраста ребёнка лучше, чтобы администратор подобрал вариант лично. Я передам заявку — он перезвонит вам с подходящим решением.`,
+      state
+    );
+  }
 
   // Если direction ещё не известен, но из state.need можно вывести (например "хочу танцевать" → Hip-hop) —
   // мы НЕ устанавливаем direction молча, а явно объявляем клиенту: «Для дочки в этом возрасте
@@ -2536,10 +2565,12 @@ function matchDirection(state: SalesDialogState): { direction: string; pitch: st
       pitch: "если хочется именно такой формат, можно попробовать леди стайл: красивые связки и плавная пластика.",
       needlesMatch: containsAny(lower, ["леди", "lady", "heels", "хилс"])
     });
-    // ИНТЕРВЕНЦИЯ: если ни один needle не сматчился, но клиент дал нам learnerType=child + age —
-    // выдаём дефолтные «детские» направления по приоритету availability.
+    // ИНТЕРВЕНЦИЯ: если ни один needle не сматчился — выдаём Hip-hop по умолчанию.
+    // Раньше pitch упоминал «для этого возраста» даже когда age был неизвестен — это вело
+    // к фразам бота про возраст, которого нет. Теперь age-нейтральная формулировка.
     if (!candidates.some((c) => c.needlesMatch)) {
-      candidates.push({ direction: "Hip-hop", pitch: "для этого возраста чаще всего хорошо заходит хип-хоп — самое популярное и для начала простое.", needlesMatch: true });
+      const ageHint = state.age ? `для ${state.age} лет ` : "";
+      candidates.push({ direction: "Hip-hop", pitch: `${ageHint}хорошо подходит хип-хоп — самое популярное и для начала простое направление.`.trim(), needlesMatch: true });
     }
   } else {
     // Для взрослого матчим из общего списка directionByNeed.
