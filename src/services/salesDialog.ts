@@ -957,16 +957,26 @@ export async function handleSalesDialog(input: SalesDialogInput): Promise<SalesD
       );
     }
 
+    // Категория-конфликт = неявный отказ. Клиент в реплике выразил предпочтение
+    // («нужно спокойное», «хочу поактивнее»), не совпадающее с категорией pending.
+    // Это сильнее, чем "уточню — подойдёт?" — клиент уже сказал чего хочет, бот должен переключиться.
+    const messageCategory = classifyNeedCategory(text);
+    const pendingCategory = DIRECTION_CATEGORY[pending] ?? "neutral";
+    const categoryConflict = messageCategory !== "neutral" && pendingCategory !== "neutral" && messageCategory !== pendingCategory;
+
     // КРИТИЧНО: rejection побеждает acceptance. Если клиент сказал «давайте другое посмотрим» —
     // это И «давайте» (acceptance pattern), И «давайте другое» (rejection pattern). Раньше
     // acceptance вы́играл и бот молча подтверждал отвергнутое направление.
     // Теперь rejection срабатывает безусловно, не оглядываясь на acceptance.
-    if (explicitRejection) {
+    if (explicitRejection || categoryConflict) {
       state.rejectedDirections = [...new Set([...(state.rejectedDirections ?? []), pending])];
       state._pendingDirection = undefined;
-      // Не обнуляем state.need: клиент по-прежнему хочет «поспокойней / поактивнее»,
-      // просто это конкретное направление ему не подошло. Без этого suggestPopularDirection
-      // выдаёт первое из списка (Hip-hop для мужчины), игнорируя предпочтение клиента.
+      // Сохраняем предпочтение клиента в state.need, чтобы suggestPopularDirection
+      // выдал правильную категорию. Без этого после отказа от Hip-hop клиенту, попросившему
+      // спокойное, бот выдаёт Breakdance (просто следующий в списке).
+      if (categoryConflict) {
+        state.need = text;
+      }
       const suggested = suggestPopularDirection(state);
       if (suggested) {
         return ask(
@@ -984,9 +994,11 @@ export async function handleSalesDialog(input: SalesDialogInput): Promise<SalesD
       state.directionConfirmed = true;
       state._pendingDirection = undefined;
     } else {
+      // Используем directionForSpeech, чтобы получить русское название («брейкданс»,
+      // «хип-хоп»), а не latin ключ («breakdance», «Hip-hop») из state.
       return ask(
         "ask_direction_confirm",
-        `${state.customerName ? `${state.customerName}, ` : ""}уточню: ${pending.toLowerCase()} — подойдёт, или хотите посмотреть другое направление?`,
+        `${state.customerName ? `${state.customerName}, ` : ""}уточню: ${directionForSpeech(pending)} — подойдёт, или хотите посмотреть другое направление?`,
         state
       );
     }
