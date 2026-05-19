@@ -1717,8 +1717,10 @@ function buildActionNotes(action: SalesBrainAction, state: SalesBrainState, cust
       return notes;
     case "ask_direction_confirm": {
       const msgLower = customerMessage.toLowerCase();
+      // КРИТИЧНО: \w в JS regex НЕ матчит кириллицу (только ASCII). Используем [а-яё]
+      // для кириллических окончаний — иначе "расскажите", "поясните" не ловятся.
       const asksAboutDirection =
-        /(?:что\s+(?:такое|это)|это\s+что|расскаж\w*\s+про|поясн\w*\s+про|какой\s+это|объясн)/i.test(msgLower);
+        /(?:что\s+(?:такое|это)|это\s+что|расскаж[а-яё]*\s+про|поясн[а-яё]*\s+про|какой\s+это|объясн)/i.test(msgLower);
       const pending = (fullState as SalesDialogState)._pendingDirection;
       if (asksAboutDirection && pending) {
         notes.push(
@@ -1798,7 +1800,7 @@ function isAcceptableBrainReply(
     const looksLikeAskNeedQuestion =
       /(?:поактивн|поспокойн|более\s+актив|более\s+спок)/i.test(lower) ||
       /(?:что\s+(?:вам|больше)\s+(?:нравится|ближе|подходит|интересно|хочется))/i.test(lower) ||
-      /(?:уже\s+есть\s+конкретн\w*\s+направ|конкретн\w*\s+направление\s+в\s+голове)/i.test(lower) ||
+      /(?:уже\s+есть\s+конкретн[а-яё]*\s+направ|конкретн[а-яё]*\s+направление\s+в\s+голове)/i.test(lower) ||
       /(?:вам\s+ближе\s+(?:что-то|что\s+то)\s+поактив|вам\s+ближе\s+(?:что-то|что\s+то)\s+поспок)/i.test(lower);
     if (looksLikeAskNeedQuestion) {
       return false;
@@ -2214,7 +2216,7 @@ async function mergeExtractedFields(state: SalesDialogState, lower: string, orig
     // Иначе бот считает, что клиент выбрал направление, и пропускает ask_direction_confirm.
     const isClarifyAboutDirection =
       isClarifyingUserQuestion(original) ||
-      /(?:что\s+(?:такое|это)|это\s+что|расскаж\w*\s+про|поясн\w*\s+про|какой\s+это)/i.test(lower);
+      /(?:что\s+(?:такое|это)|это\s+что|расскаж[а-яё]*\s+про|поясн[а-яё]*\s+про|какой\s+это)/i.test(lower);
     if (!isClarifyAboutDirection) {
       state.direction = direction;
     } else {
@@ -2350,7 +2352,7 @@ async function mergeExtractedFields(state: SalesDialogState, lower: string, orig
       // («что такое брейк-данс?»), а не подтверждает — кладём в _pendingDirection.
       const isClarifyAboutDirection =
         isClarifyingUserQuestion(lower) ||
-        /(?:что\s+(?:такое|это)|это\s+что|расскаж\w*\s+про|поясн\w*\s+про|какой\s+это|че\s+это|чё\s+это)/i.test(lower);
+        /(?:что\s+(?:такое|это)|это\s+что|расскаж[а-яё]*\s+про|поясн[а-яё]*\s+про|какой\s+это|че\s+это|чё\s+это)/i.test(lower);
       if (isClarifyAboutDirection) {
         state._pendingDirection = aiExtraction.direction;
       } else {
@@ -2754,7 +2756,7 @@ function isStudioInfoQuestion(text: string): boolean {
   // 1) «расскажите ... про/о/об ... студию/школу/...» — любые слова между «расскажите» и «про X».
   //    Ловит: «расскажите про вашу школу», «расскажите подробнее про студию»,
   //           «расскажите что-нибудь ещё про вашу студию», «расскажите-ка о школе».
-  if (/(?:расскаж\w+|поведай\w*|опиши\w*|поясн\w*)\b[\s\S]{0,40}?(?:про|о|об)\s+(?:вашу?\s+|вашей\s+|вашем\s+|свою\s+|своей\s+|своей\s+)?(?:студи|школ|компани|зал|клуб|вас|себ)/i.test(t)) {
+  if (/(?:расскаж[а-яё]+|поведай[а-яё]*|опиши[а-яё]*|поясн[а-яё]*)\b[\s\S]{0,40}?(?:про|о|об)\s+(?:вашу?\s+|вашей\s+|вашем\s+|свою\s+|своей\s+|своей\s+)?(?:студи|школ|компани|зал|клуб|вас|себ)/i.test(t)) {
     return true;
   }
   // 2) «что/кто у вас за студия» и подобное.
@@ -2762,7 +2764,7 @@ function isStudioInfoQuestion(text: string): boolean {
     return true;
   }
   // 3) «больше про студию», «информацию о школе», «подробнее о вас».
-  if (/(?:подробн\w+|больше|информаци\w+|деталь\w+)\s+(?:про|о|об)\s+(?:вашу?\s+|вашей\s+|свою\s+|своей\s+)?(?:студи|школ|зал|вас|себ)/i.test(t)) {
+  if (/(?:подробн[а-яё]+|больше|информаци[а-яё]+|деталь[а-яё]+)\s+(?:про|о|об)\s+(?:вашу?\s+|вашей\s+|свою\s+|своей\s+)?(?:студи|школ|зал|вас|себ)/i.test(t)) {
     return true;
   }
   // 4) «что вы предлагаете», «расскажите о себе/о вас».

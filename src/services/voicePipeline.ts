@@ -105,22 +105,10 @@ export async function handleVoiceTurn(input: VoiceTurnInput): Promise<VoiceTurnR
     src: result.brainSource,
     reply: result.reply.slice(0, 200)
   }));
-  let backchannel = getBackchannelKeyForAction(result.action, input.message);
-  // Если ответ ассистента уже начинается с подтверждения — backchannel "поняла/ага/так" повторит то же.
-  if (backchannel) {
-    const replyStart = result.reply.toLowerCase().slice(0, 60).replace(/^[А-ЯЁа-яё]+,\s*/u, "");
-    if (/^(?:понял[аи]|ага|так[,.]|хорошо|конечно|удобно)/.test(replyStart)) {
-      backchannel = null;
-    }
-  }
-  // Если бот повторяет тот же шаг (не понял с первого раза) — нейтральные "поняла"/"ага" звучат
-  // как ложь, но эмпатичное "понимаю," остаётся уместным (клиент сомневается, мы это признаём).
-  if (backchannel) {
-    const retries = result.state?.retriesOnAction?.[result.action] ?? 0;
-    if (retries > 0 && backchannel !== "ponimayu") {
-      backchannel = null;
-    }
-  }
+  // Пре-reply backchannel («понимаю», «поняла», «ага» перед ответом бота) отключены —
+  // клиент пишет что они режут слух и звучат лишними после его реплики.
+  // Активное слушание (ugu во время речи клиента) остаётся — оно работает иначе и нравится.
+  const backchannel: BackchannelKey | null = null;
   const thinkingDelayMs = pickThinkingDelayMs(result.action, input.message);
   const voicePreset = pickVoicePreset(result.action, input.message);
 
