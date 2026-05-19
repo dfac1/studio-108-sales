@@ -18,6 +18,9 @@ export interface AnthropicTextRequest {
   model: string;
   system: string;
   user: string;
+  /** Опциональная история (без текущего user-сообщения) для диалоговых сценариев,
+   *  где LLM нужна память о собственных репликах. Передаётся как `messages` перед user. */
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
@@ -92,7 +95,10 @@ export async function callAnthropicText(req: AnthropicTextRequest): Promise<Anth
         max_tokens: req.maxTokens ?? 350,
         temperature: req.temperature ?? 0.6,
         system: buildCachedSystem(req.system, req.cacheTtl),
-        messages: [{ role: "user", content: req.user }]
+        messages: [
+          ...(req.history ?? []).map((m) => ({ role: m.role, content: m.content })),
+          { role: "user", content: req.user }
+        ]
       }),
       signal: controller.signal
     });

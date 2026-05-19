@@ -9,6 +9,7 @@ import type { Slot, Booking, Branch } from "../types.js";
 import { callAnthropicText, isAnthropicConfigured } from "./anthropicClient.js";
 import { findSlots, getSlotById } from "./slotService.js";
 import { createBooking } from "./bookingService.js";
+import { cleanHumanReply } from "./russianSpeech.js";
 import {
   buildStepPrompt,
   parseTransition,
@@ -211,6 +212,16 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
   const systemPrompt = buildStepPrompt(step, context, availableSlots);
   const userMessage = input.message?.trim() || "(клиент молчит)";
 
+  // История разговора — без неё LLM забывает что только что предложил.
+  // Хранится в state в виде [{role, content}], cap 8 сообщений (~4 turn'а).
+  type HistMsg = { role: "user" | "assistant"; content: string };
+  const stateAny = incoming as SalesDialogState & { _v2History?: HistMsg[] };
+  const history: HistMsg[] = Array.isArray(stateAny._v2History)
+    ? stateAny._v2History
+        .filter((m): m is HistMsg => (m?.role === "user" || m?.role === "assistant") && typeof m?.content === "string")
+        .map((m) => ({ role: m.role, content: m.content }))
+    : [];
+
   let llmReply = "";
   let brainSource = "v2_anthropic";
   let brainCache: SalesDialogResult["brainCache"];
@@ -220,6 +231,7 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
       const result = await callAnthropicText({
         model: config.anthropic.dialogModel,
         system: systemPrompt,
+        history,
         user: userMessage,
         maxTokens: 500,
         temperature: 0.7,
@@ -245,7 +257,8 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
 
   // Парсим маркер перехода.
   const transition = parseTransition(llmReply);
-  const cleanReply = stripTransitionMarker(llmReply);
+  // Чистим: маркер + нормализуем мужские формы на женские («понял» → «поняла»).
+  const cleanReply = cleanHumanReply(stripTransitionMarker(llmReply));
 
   // Применяем contextUpdate.
   let nextState: SalesDialogState = { ...incoming };
@@ -297,6 +310,16 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
       console.error("[salesDialogV2] handoff log failed:", err instanceof Error ? err.message : err);
     }
   }
+
+  // Обновляем историю разговора. Берём cleanReply без маркера — LLM в следующем turn
+  // не должна видеть свои же маркеры (это инструкция системе, не часть диалога).
+  // Cap 8 сообщений (~4 пары turn'ов) — достаточно для памяти о текущем шаге.
+  const newHistory: HistMsg[] = [
+    ...history,
+    { role: "user" as const, content: userMessage },
+    { role: "assistant" as const, content: cleanReply },
+  ].slice(-8);
+  (nextState as SalesDialogState & { _v2History?: HistMsg[] })._v2History = newHistory;
 
   return {
     reply: cleanReply,
