@@ -1136,6 +1136,7 @@ async function handleSpeechCaptured() {
   // Late-thinking filler: если brain не ответил за 3 сек — играем тихое «секундочку»,
   // чтобы клиент не слушал 5+ секунд тишины. Серверный backchannel приходит после brain'а
   // и не успевает спасти ситуацию на медленных ходах (когда модель композит нетиповой ответ).
+  let lateThinkingFired = false;
   const lateThinkingTimer = setTimeout(() => {
     if (!voice.pendingTurn || voice.ttsPlaying) return;
     try {
@@ -1148,6 +1149,7 @@ async function handleSpeechCaptured() {
       audio.volume = 0.55;
       audio.currentTime = 0;
       audio.play().catch(() => {});
+      lateThinkingFired = true;
     } catch {}
   }, 3000);
 
@@ -1186,7 +1188,9 @@ async function handleSpeechCaptured() {
   voice.bargeinFrames = 0;
   voice.pendingTurn = false;
   try {
-    if (result.backchannel && !voice.bargein) {
+    // Если уже сыграл late-thinking filler (sek.mp3) — серверный pre-reply backchannel
+    // («понимаю», «поняла») станет вторым сэмплом подряд и режет слух. Пропускаем.
+    if (result.backchannel && !voice.bargein && !lateThinkingFired) {
       await playBackchannel(result.backchannel);
     }
     if (result.thinkingDelayMs && result.thinkingDelayMs > 0 && !voice.bargein) {
