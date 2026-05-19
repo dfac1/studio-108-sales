@@ -2,6 +2,15 @@ import type { SalesDialogInput, SalesDialogResult, SalesDialogState } from "./sa
 import type { SemanticMode, SttProviderId, TtsProviderId } from "../types.js";
 import { config } from "../config.js";
 import { handleSalesDialog } from "./salesDialog.js";
+import { handleSalesDialogV2 } from "./salesDialogV2.js";
+
+/**
+ * v2 — переписанное dialog-ядро по PSY-паттерну (см. salesPromptSteps.ts).
+ * LLM ведёт диалог через промпт + маркеры [→step:{contextUpdate}].
+ * Включается env-флагом USE_DIALOG_V2=true. По умолчанию off — старый код активен.
+ * Откат: убрать переменную из Render Environment, рестарт ~30 сек.
+ */
+const USE_DIALOG_V2 = process.env.USE_DIALOG_V2 === "true";
 import { getBackchannelKeyForAction, type BackchannelKey } from "./backchannelService.js";
 import { findPreGeneratedReply } from "./preGeneratedReplies.js";
 import { logConversationTurn, nextConversationId } from "./conversationLog.js";
@@ -82,7 +91,9 @@ export async function handleVoiceTurn(input: VoiceTurnInput): Promise<VoiceTurnR
     message: input.message,
     state: input.state
   };
-  const result = await handleSalesDialog(dialogInput);
+  const result = USE_DIALOG_V2
+    ? await handleSalesDialogV2(dialogInput)
+    : await handleSalesDialog(dialogInput);
 
   // Compact один-строковый лог для отладки через Render Logs API. Без него не видно
   // что реально происходит в диалоге — нужно сопоставлять userText / action / reply
