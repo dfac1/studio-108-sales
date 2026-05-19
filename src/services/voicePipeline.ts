@@ -83,6 +83,28 @@ export async function handleVoiceTurn(input: VoiceTurnInput): Promise<VoiceTurnR
     state: input.state
   };
   const result = await handleSalesDialog(dialogInput);
+
+  // Compact один-строковый лог для отладки через Render Logs API. Без него не видно
+  // что реально происходит в диалоге — нужно сопоставлять userText / action / reply
+  // и ключевые поля state, чтобы находить логические конфликты.
+  console.log(JSON.stringify({
+    tag: "dlg",
+    conv: conversationId,
+    t: turnIndex,
+    user: input.message.slice(0, 160),
+    action: result.action,
+    stage: result.state.stage,
+    name: result.state.customerName,
+    learner: result.state.learnerType,
+    age: result.state.age,
+    need: result.state.need?.slice(0, 80),
+    dir: result.state.direction,
+    pending: result.state._pendingDirection,
+    rej: result.state.rejectedDirections,
+    branch: result.state.branch,
+    src: result.brainSource,
+    reply: result.reply.slice(0, 200)
+  }));
   let backchannel = getBackchannelKeyForAction(result.action, input.message);
   // Если ответ ассистента уже начинается с подтверждения — backchannel "поняла/ага/так" повторит то же.
   if (backchannel) {

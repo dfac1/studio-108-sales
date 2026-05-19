@@ -553,8 +553,10 @@ function stopActiveListening() {
     try { activeListeningAudio.pause(); activeListeningAudio.currentTime = 0; } catch {}
     activeListeningAudio = null;
   }
-  // Сбрасываем «один-раз-за-речь» флаг, чтобы следующая непрерывная речь могла снова сработать.
-  activeListeningFiredThisUtterance = false;
+  // НЕ сбрасываем activeListeningFiredThisUtterance здесь — клиент может сделать короткую
+  // паузу и продолжить говорить (та же реплика). Раньше флаг сбрасывался на каждой паузе,
+  // и при долгой речи играло «угу-короткое...пауза...угу-низкое» — 2 сэмпла за один turn.
+  // Сброс делает resetForNewTurn после ответа бота.
 }
 
 function startActiveListeningLoop() {
@@ -563,10 +565,16 @@ function startActiveListeningLoop() {
   // На самой первой реплике клиента (бот ещё ничего не услышал) активное
   // слушание не запускаем — иначе «ясно, поняла» играет ДО приветствия и звучит абсурдно.
   if ((voice.completedTurns ?? 0) < 1) return;
-  // Один «угу» на одну непрерывную речь. Раньше тикали каждые 3 сек, и при долгой речи
-  // клиента получался «угу-угу-угу» каждые несколько секунд — звучало как зацикленный сэмпл.
-  activeListeningFiredThisUtterance = false;
+  // Если уже сработали на этом turn'е — больше не пытаемся (даже если речь продолжается).
+  if (activeListeningFiredThisUtterance) return;
   scheduleActiveListeningTick();
+}
+
+// Сбрасываем «один-раз-за-turn» флаг ТОЛЬКО когда начинается новый turn клиента
+// (после того как бот ответил). Это убирает каскад angle 2-3 «угу» за одну реплику.
+function resetActiveListeningForNewTurn() {
+  activeListeningFiredThisUtterance = false;
+  lastActiveBc = "";
 }
 
 let activeListeningFiredThisUtterance = false;
@@ -1162,6 +1170,8 @@ async function handleSpeechCaptured() {
 
   state.dialog = result.state || {};
   voice.completedTurns = (voice.completedTurns || 0) + 1;
+  // Новый turn клиента — разрешаем активному слушанию сработать снова в этом turn'е.
+  resetActiveListeningForNewTurn();
   appendMessage("assistant", result.reply);
   renderSlots(result.slots);
   if (result.booking) {
