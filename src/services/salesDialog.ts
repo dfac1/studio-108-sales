@@ -2840,6 +2840,8 @@ function isNoTimeObjection(text: string): boolean {
   if (["нет времени", "не успе", "занят", "плотный график", "некогда", "другой день", "другое время", "поменять время"].some((w) => text.includes(w))) return true;
   if (/(?:утр[оаe]?|днем|днём|вечер[оа]?м?|по\s+утр|по\s+вечер)\s*(?:вообще\s+)?(?:не\s+подход|неудобн|не\s*удобн|не\s+можем)/i.test(text)) return true;
   if (/(?:не\s+подход|неудобн|не\s*удобн|нет)\s*(?:по\s+)?(?:утр|днем|днём|вечер)/i.test(text)) return true;
+  // «слишком рано», «слишком поздно», «рановато», «поздновато», «попозже», «пораньше»
+  if (/(?:слишком\s+)?(?:ран[оаыйe]|поздн[оаыйe]|поздновато|рановато|попозже|пораньше)\b/i.test(text)) return true;
   return false;
 }
 
@@ -2945,13 +2947,19 @@ function branchPrepositional(branch: Branch): string {
 }
 
 function directionForSpeech(direction: string): string {
+  // Возвращает кириллическое произношение направления для речи. Latin/English-ключи
+  // ('Contemporary', 'Lady style', 'K-pop', 'Hip-hop', 'Breakdance') в TTS звучат
+  // как «контемпорари» с английским акцентом — режет слух русскому слушателю.
   const normalized = direction.toLowerCase();
-  if (normalized.includes("hip-hop")) return "хип-хоп";
+  if (normalized.includes("hip-hop") || normalized.includes("hip hop")) return "хип-хоп";
   if (normalized.includes("break")) return "брейкданс";
-  if (normalized.includes("contemporary")) return "contemporary";
-  if (normalized.includes("salsa") || normalized.includes("bachata")) return "сальса и бачата";
-  if (normalized.includes("k-pop")) return "K-pop";
-  if (normalized.includes("lady")) return "Lady style";
+  if (normalized.includes("contemporary") || normalized.includes("контемп")) return "контемп";
+  if (normalized.includes("salsa") || normalized.includes("bachata") || normalized.includes("сальс") || normalized.includes("бачат")) return "сальса и бачата";
+  if (normalized.includes("k-pop") || normalized.includes("кей-поп") || normalized.includes("к-поп")) return "кей-поп";
+  if (normalized.includes("lady")) return "леди-стайл";
+  if (normalized.includes("zumba") || normalized.includes("зумб")) return "зумба";
+  if (normalized.includes("dancehall")) return "дэнсхолл";
+  if (normalized.includes("jazz")) return "джаз-фанк";
   return direction;
 }
 
