@@ -323,16 +323,56 @@ function isDirectionMentionedExplicitly(text: string): boolean {
   return aliases.some((a) => lower.includes(a));
 }
 
+type DirectionCategory = "active" | "calm" | "neutral";
+
+const DIRECTION_CATEGORY: Record<string, DirectionCategory> = {
+  "Hip-hop": "active",
+  "Breakdance": "active",
+  "Zumba": "active",
+  "Jazz funk": "active",
+  "K-pop": "active",
+  "Dancehall": "active",
+  "Йога": "calm",
+  "Contemporary": "calm",
+  "Lady style": "calm",
+  "Stretch": "calm",
+  "Стрип-пластика": "calm",
+  "Восточные танцы": "calm",
+  "Детская хореография": "calm",
+  "Salsa": "neutral",
+  "Bachata": "neutral",
+  "Salsa/Bachata": "neutral"
+};
+
+/**
+ * Классифицирует выраженную клиентом потребность (state.need или явный текст)
+ * в категорию «активное / спокойное / нейтральное». Используется, чтобы
+ * после отказа от одного направления НЕ предложить противоположное по характеру.
+ */
+function classifyNeedCategory(need: string | undefined): DirectionCategory {
+  if (!need) return "neutral";
+  const lower = need.toLowerCase();
+  if (/(?:поспок|спок|медлен|плавн|мягк|растяж|расслаб|здоров|пласт|йог|стрейч|stretch|восточ)/iu.test(lower)) return "calm";
+  if (/(?:поактив|актив|подвиж|динам|темп|бодр|энерг|разогнат|похуд|встрях|кардио|быстр|хип|hip|брейк|зумб|breakdance|zumba|k-pop|кпоп|кей-поп)/iu.test(lower)) return "active";
+  return "neutral";
+}
+
 /**
  * Если клиент сам не знает чего хочет — бот берёт инициативу и предлагает
  * самое популярное направление под профиль (возраст + child/adult).
  * Возвращает direction + готовую короткую "продающую" фразу.
+ *
+ * КРИТИЧНО: если клиент уже сказал «поспокойней» или «поактивнее» (state.need),
+ * предложения противоположной категории отсекаются, даже если они «популярнее».
+ * Иначе после отказа от Йоги бот рекомендует Hip-hop клиенту, попросившему спокойное.
  */
 function suggestPopularDirection(state: SalesDialogState): { direction: string; pitch: string } | undefined {
   const rejected = new Set(state.rejectedDirections ?? []);
+  const wantedCategory = classifyNeedCategory(state.need);
 
   // Список потенциальных предложений в приоритете. Для каждого учитываем:
-  // (1) не в rejected, (2) availability check для (age, branch).
+  // (1) не в rejected, (2) availability check для (age, branch),
+  // (3) категория совместима с предпочтением клиента.
   const pool: Array<{ direction: string; pitch: string }> = [];
 
   if (state.learnerType === "child") {
@@ -356,8 +396,25 @@ function suggestPopularDirection(state: SalesDialogState): { direction: string; 
     }
   }
 
-  for (const candidate of pool) {
+  // Сортируем пул по совместимости с категорией клиента:
+  // 0 = в той же категории, 1 = нейтральное направление, 2 = противоположная категория.
+  const rank = (dir: string): number => {
+    const cat = DIRECTION_CATEGORY[dir] ?? "neutral";
+    if (wantedCategory === "neutral") return cat === "neutral" ? 1 : 0;
+    if (cat === wantedCategory) return 0;
+    if (cat === "neutral") return 1;
+    return 2;
+  };
+  const ordered = [...pool].sort((a, b) => rank(a.direction) - rank(b.direction));
+
+  for (const candidate of ordered) {
     if (rejected.has(candidate.direction)) continue;
+    // Если клиент явно выразил предпочтение — НЕ предлагаем противоположное.
+    // Лучше дойти до handoff, чем подсунуть Hip-hop тому, кто попросил спокойное.
+    if (wantedCategory !== "neutral") {
+      const cat = DIRECTION_CATEGORY[candidate.direction] ?? "neutral";
+      if (cat !== "neutral" && cat !== wantedCategory) continue;
+    }
     if (!isDirectionAvailable(candidate.direction, { age: state.age, branch: state.branch })) continue;
     return candidate;
   }
@@ -905,7 +962,9 @@ export async function handleSalesDialog(input: SalesDialogInput): Promise<SalesD
     if (explicitRejection) {
       state.rejectedDirections = [...new Set([...(state.rejectedDirections ?? []), pending])];
       state._pendingDirection = undefined;
-      state.need = undefined;
+      // Не обнуляем state.need: клиент по-прежнему хочет «поспокойней / поактивнее»,
+      // просто это конкретное направление ему не подошло. Без этого suggestPopularDirection
+      // выдаёт первое из списка (Hip-hop для мужчины), игнорируя предпочтение клиента.
       const suggested = suggestPopularDirection(state);
       if (suggested) {
         return ask(
