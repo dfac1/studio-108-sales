@@ -1501,8 +1501,70 @@ async function humanizeSalesReply(input: {
   });
 
   const candidateReply = cleanHumanReply(brain.reply || input.fallbackReply);
-  const reply = isAcceptableBrainReply(input.action, candidateReply, input.customerMessage, input.state, input.fallbackReply) ? candidateReply : input.fallbackReply;
+  const validatedReply = isAcceptableBrainReply(input.action, candidateReply, input.customerMessage, input.state, input.fallbackReply) ? candidateReply : input.fallbackReply;
+  // Locked-question mode: вопрос всегда от FSM, чтобы brain не подменял план.
+  // Brain пишет только подводку (acknowledgment), а финальный вопрос приклеивается из fallback.
+  // Это убирает класс багов «brain сам спросил не то» — например, «контемп или классику?»
+  // вместо «контемп — попробуем?», или «поактивнее/поспокойнее» после уже выбранного direction.
+  const reply = lockFsmQuestion(input.action, validatedReply, input.fallbackReply, input.state);
   return { reply, source: brain.source, cacheUsage: brain.cacheUsage };
+}
+
+/**
+ * Заменяет финальный вопрос brain'а на финальный вопрос FSM. Brain остаётся источником
+ * подводки/контекста (acknowledgment), но какой именно вопрос задать клиенту — решает FSM.
+ *
+ * Случаи без вопроса (booked, handoff) проходят без изменений.
+ *
+ * Особый случай ask_direction_confirm: эта стадия больше всего страдает от дрейфа brain
+ * (предложение двух направлений сразу, замена direction'а на собственный вариант), поэтому
+ * здесь возвращаем fallback целиком — никакой подводки от brain не нужно.
+ */
+function lockFsmQuestion(
+  action: SalesBrainAction,
+  brainReply: string,
+  fallbackReply: string,
+  state: SalesBrainState
+): string {
+  if (action === "booked" || action === "handoff") return brainReply;
+  // На ask_direction_confirm brain слишком часто подсовывает «или», «классика», другие
+  // направления — поэтому используем план FSM как есть.
+  if (action === "ask_direction_confirm") return fallbackReply;
+
+  const fsmQuestion = extractFinalQuestion(fallbackReply);
+  if (!fsmQuestion) return brainReply;
+  // Если у brain нет осмысленной подводки — используем fallback как есть.
+  const brainLeadIn = stripFinalQuestion(brainReply).trim();
+  if (brainLeadIn.length < 8) return fallbackReply;
+
+  let result = brainLeadIn;
+  if (!/[.!?]$/u.test(result)) result += ".";
+  result += " " + fsmQuestion.trim();
+
+  // Дедуп обращения по имени: brain мог начать «Андрей, поняла.», и FSM-вопрос
+  // тоже начинается с «Андрей,». Убираем второе вхождение.
+  const name = state.customerName;
+  if (name) {
+    const namePrefix = `${name},`;
+    const first = result.indexOf(namePrefix);
+    if (first !== -1) {
+      const second = result.indexOf(namePrefix, first + namePrefix.length);
+      if (second !== -1) {
+        result = result.slice(0, second) + result.slice(second + namePrefix.length).trimStart();
+      }
+    }
+  }
+  return result;
+}
+
+function extractFinalQuestion(text: string): string | null {
+  // Берём ПОСЛЕДНЮЮ группу символов от точки/!/? до финального «?».
+  const match = text.match(/(?:^|[.!?])\s*([^.!?]+\?)\s*$/u);
+  return match ? match[1].trim() : null;
+}
+
+function stripFinalQuestion(text: string): string {
+  return text.replace(/[^.!?]+\?\s*$/u, "");
 }
 
 function buildActionNotes(action: SalesBrainAction, state: SalesBrainState, customerMessage: string): string[] {
