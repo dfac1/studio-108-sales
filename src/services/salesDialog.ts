@@ -379,6 +379,7 @@ function suggestPopularDirection(state: SalesDialogState): { direction: string; 
     pool.push({ direction: "Hip-hop",            pitch: "Для этого возраста сейчас популярен хип-хоп — ритмичный, понятный, подходит большинству." });
     pool.push({ direction: "Breakdance",         pitch: "Если ребёнок активный — отлично заходит брейкданс: силовой и динамичный." });
     pool.push({ direction: "Contemporary",       pitch: "Для плавных движений хорошо подходит контемп — там учатся выражать эмоции через движение." });
+    pool.push({ direction: "Lady style",         pitch: "Для подростков, которым ближе женственный формат, отлично подходит леди стайл — плавная пластика и красивые связки." });
     pool.push({ direction: "Детская хореография", pitch: "Для спокойного начала отлично подходит детская хореография — мягкий формат и хорошая база." });
   } else {
     // Взрослые
@@ -2523,7 +2524,14 @@ function matchDirection(state: SalesDialogState): { direction: string; pitch: st
     candidates.push({
       direction: "Contemporary",
       pitch: "для пластики и плавных движений хорошо подходит контемп: ребята учатся выражать эмоции через движение.",
-      needlesMatch: containsAny(lower, ["пласт", "плавн", "выраж"])
+      needlesMatch: containsAny(lower, ["пласт", "плавн", "выраж", "современ"])
+    });
+    // Lady style — для подростков, которые хотят «женственное»/«красивое».
+    // Доступность по возрасту проверит isDirectionAvailable (в студии Lady style — от 12+).
+    candidates.push({
+      direction: "Lady style",
+      pitch: "если хочется чего-то женственного и пластичного — отлично подойдёт леди стайл: красивые связки и плавная пластика.",
+      needlesMatch: containsAny(lower, ["женствен", "поженствен", "леди", "lady", "heels", "хилс", "красив", "девочк", "девуш"])
     });
     // ИНТЕРВЕНЦИЯ: если ни один needle не сматчился, но клиент дал нам learnerType=child + age —
     // выдаём дефолтные «детские» направления по приоритету availability.
