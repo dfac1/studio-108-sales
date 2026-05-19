@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .env.*
+.render-token
 data/*.jsonl
 data/tts-cache/
 data/call-analysis/inbox/
