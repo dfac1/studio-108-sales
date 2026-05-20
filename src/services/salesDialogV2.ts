@@ -258,7 +258,7 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
   // Парсим маркер перехода.
   const transition = parseTransition(llmReply);
   // Чистим: маркер + нормализуем мужские формы на женские («понял» → «поняла»).
-  const cleanReply = cleanHumanReply(stripTransitionMarker(llmReply));
+  let cleanReply = cleanHumanReply(stripTransitionMarker(llmReply));
 
   // Применяем contextUpdate.
   let nextState: SalesDialogState = { ...incoming };
@@ -278,6 +278,57 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
   // Бизнес-логика на основе нового шага.
   let booking: Booking | undefined;
   let slots: Slot[] | undefined = foundSlots.length ? foundSlots : undefined;
+
+  // AUTO-CONTINUE для переходов где LLM нужны свежие server-данные.
+  // offer_slot: данные о слотах подгружаются по новому direction+branch+age.
+  // Без auto-continue первая реплика заканчивается на «Поняла, у озера.» и разговор зависает —
+  // следующий слот появится только когда клиент сам что-то скажет.
+  if (
+    nextStep === "offer_slot" &&
+    step !== "offer_slot" &&
+    nextState.direction &&
+    nextState.branch &&
+    nextState.branch !== "Черняховского"
+  ) {
+    try {
+      const picked2 = pickAvailableSlots(nextState);
+      slots = picked2.slots.length ? picked2.slots : slots;
+      const ctx2 = buildContext(nextState);
+      const prompt2 = buildStepPrompt("offer_slot", ctx2, picked2.asAvailable);
+      const history2: HistMsg[] = [
+        ...history,
+        { role: "user" as const, content: userMessage },
+        { role: "assistant" as const, content: cleanReply },
+      ];
+      const r2 = await callAnthropicText({
+        model: config.anthropic.dialogModel,
+        system: prompt2,
+        history: history2,
+        user: "(продолжи: предложи ближайший подходящий слот из контекста)",
+        maxTokens: 350,
+        temperature: 0.6,
+        timeoutMs: config.anthropic.dialogTimeoutMs,
+        cacheTtl: config.anthropic.cacheTtl,
+      });
+      const transition2 = parseTransition(r2.text);
+      const reply2 = cleanHumanReply(stripTransitionMarker(r2.text));
+      if (reply2) {
+        cleanReply = `${cleanReply} ${reply2}`.replace(/\s+/g, " ").trim();
+      }
+      if (transition2?.contextUpdate) {
+        nextState = applyContextUpdate(nextState, transition2.contextUpdate);
+      }
+      if (brainCache) {
+        brainCache.inputTokens += r2.inputTokens;
+        brainCache.outputTokens += r2.outputTokens;
+        brainCache.cacheCreationInputTokens += r2.cacheCreationInputTokens;
+        brainCache.cacheReadInputTokens += r2.cacheReadInputTokens;
+      }
+      brainSource = `${brainSource}+auto_continue`;
+    } catch (err) {
+      console.error("[salesDialogV2] auto-continue failed:", err instanceof Error ? err.message : err);
+    }
+  }
 
   if (nextStep === "booked" && incoming.stage !== "booked") {
     const slotId = nextState.selectedSlotId;

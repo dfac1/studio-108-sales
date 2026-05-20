@@ -902,11 +902,17 @@ function monitorRecordingVad() {
     } else if (voice.isSpeaking) {
       if (voice.silenceStartedAt === 0) {
         voice.silenceStartedAt = now;
-      } else if (now - voice.silenceStartedAt > VAD.silenceMs && now - voice.speechStartedAt > VAD.minSpeechMs) {
-        voice.continuousSpeechStartedAt = 0;
-        stopActiveListening();
-        try { voice.recorder.stop(); } catch {}
-        return;
+      } else {
+        // На шаге ask_phone клиент диктует цифры с паузами (8... 922... 653...) —
+        // обычный 1800мс silence отрезает на полу-фразе. Расширяем до 3500мс.
+        const stage = state.dialog?.stage;
+        const effectiveSilenceMs = stage === "ask_phone" ? 3500 : VAD.silenceMs;
+        if (now - voice.silenceStartedAt > effectiveSilenceMs && now - voice.speechStartedAt > VAD.minSpeechMs) {
+          voice.continuousSpeechStartedAt = 0;
+          stopActiveListening();
+          try { voice.recorder.stop(); } catch {}
+          return;
+        }
       }
     } else {
       const idle = now - listenStartedAt;
