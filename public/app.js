@@ -580,16 +580,17 @@ function resetActiveListeningForNewTurn() {
 let activeListeningFiredThisUtterance = false;
 
 function scheduleActiveListeningTick() {
-  // Срабатываем ОДИН раз через 5–7 сек после начала непрерывной речи.
-  // Это «середина» долгой реплики клиента — короткие фразы не успевают добежать до тика.
-  const delay = 5000 + Math.random() * 2000;
+  // Срабатываем ОДИН раз через 3.5–5 сек после начала непрерывной речи.
+  // Раньше 5-7сек — короткие реплики (10-15 сек) никогда не получали угу.
+  // Теперь триггер раньше: на реплике 4-5 сек уже сработает.
+  const delay = 3500 + Math.random() * 1500;
   activeListeningTimer = setTimeout(() => {
     activeListeningTimer = 0;
     if (!voice.isSpeaking) return;
     if (voice.ttsPlaying) return;
     if (activeListeningFiredThisUtterance) return;
-    // Не вставляем, если клиент только что начал говорить (меньше 4 сек).
-    if (voice.speechStartedAt && performance.now() - voice.speechStartedAt < 4000) {
+    // Не вставляем, если клиент только что начал говорить (меньше 3 сек).
+    if (voice.speechStartedAt && performance.now() - voice.speechStartedAt < 3000) {
       // Перепланируем — следующий тик попробует позже.
       scheduleActiveListeningTick();
       return;
@@ -1139,9 +1140,11 @@ async function handleSpeechCaptured() {
 
   setLiveState("thinking", "Думаю");
 
-  // Late-thinking filler: если brain не ответил за 3 сек — играем тихое «секундочку»,
+  // Late-thinking filler: если brain не ответил за 5 сек — играем тихое «секундочку»,
   // чтобы клиент не слушал 5+ секунд тишины. Серверный backchannel приходит после brain'а
   // и не успевает спасти ситуацию на медленных ходах (когда модель композит нетиповой ответ).
+  // Раньше 3 сек — но с v2 + auto-continue brain отвечает 4-6 сек обычно, и sek.mp3 звучал
+  // на каждом ходе, что раздражало.
   let lateThinkingFired = false;
   const lateThinkingTimer = setTimeout(() => {
     if (!voice.pendingTurn || voice.ttsPlaying) return;
@@ -1157,7 +1160,7 @@ async function handleSpeechCaptured() {
       audio.play().catch(() => {});
       lateThinkingFired = true;
     } catch {}
-  }, 3000);
+  }, 5000);
 
   let result;
   try {
