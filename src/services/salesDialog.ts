@@ -2946,7 +2946,7 @@ function branchPrepositional(branch: Branch): string {
   return map[branch];
 }
 
-function directionForSpeech(direction: string): string {
+export function directionForSpeech(direction: string): string {
   // Возвращает кириллическое произношение направления для речи. Latin/English-ключи
   // ('Contemporary', 'Lady style', 'K-pop', 'Hip-hop', 'Breakdance') в TTS звучат
   // как «контемпорари» с английским акцентом — режет слух русскому слушателю.

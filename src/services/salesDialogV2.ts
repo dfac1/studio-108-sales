@@ -19,7 +19,7 @@ import {
   type AvailableSlot,
 } from "./salesPromptSteps.js";
 import type { SalesDialogState, SalesDialogResult, SalesDialogInput } from "./salesDialog.js";
-import { extractRussianNumeralWordsAsDigits, normalizeRussianPhone } from "./salesDialog.js";
+import { extractRussianNumeralWordsAsDigits, normalizeRussianPhone, directionForSpeech } from "./salesDialog.js";
 import { recordHandoff } from "./handoffService.js";
 import type { SalesBrainAction } from "./openAiSalesBrain.js";
 
@@ -260,7 +260,8 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
         }
       }
       const name = incoming.customerName ? `${incoming.customerName}, ` : "";
-      const dirName = incoming.direction ? `, направление ${slot?.direction ? slot.direction.toLowerCase() : incoming.direction.toLowerCase()}` : "";
+      const dirSpoken = incoming.direction ? directionForSpeech(slot?.direction ?? incoming.direction) : "";
+      const dirName = dirSpoken ? `, направление ${dirSpoken}` : "";
       const slotPart = slot ? `${slot.weekday} в ${slot.time}, филиал ${slot.branch}` : "";
       const farewell = `${name}записала ${incoming.learnerType === "child" ? (incoming.childGender === "girl" ? "вашу дочку" : incoming.childGender === "boy" ? "вашего сына" : "ребёнка") : "вас"} на пробное — ${slotPart}${dirName}. Пробное 300 рублей, оплата на месте. Спасибо, будем ждать вас. Уверена, вам у нас понравится. До встречи!`;
       const finalState: SalesDialogState = {
