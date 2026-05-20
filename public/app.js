@@ -1207,7 +1207,9 @@ async function handleSpeechCaptured() {
   try {
     // Если уже сыграл late-thinking filler (sek.mp3) — серверный pre-reply backchannel
     // («понимаю», «поняла») станет вторым сэмплом подряд и режет слух. Пропускаем.
-    if (result.backchannel && !voice.bargein && !lateThinkingFired) {
+    // Также пропускаем на самом первом ответе бота (completedTurns стало 1 чуть выше) —
+    // «понимаю» перед приветствием звучит абсурдно: бот ещё ничего не услышал, кроме «здравствуйте».
+    if (result.backchannel && !voice.bargein && !lateThinkingFired && voice.completedTurns > 1) {
       await playBackchannel(result.backchannel);
     }
     if (result.thinkingDelayMs && result.thinkingDelayMs > 0 && !voice.bargein) {
