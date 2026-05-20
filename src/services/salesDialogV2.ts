@@ -8,6 +8,7 @@ import { config } from "../config.js";
 import type { Slot, Booking, Branch } from "../types.js";
 import { callAnthropicText, isAnthropicConfigured } from "./anthropicClient.js";
 import { findSlots, getSlotById } from "./slotService.js";
+import { slots as allSlots } from "../data/slots.js";
 import { createBooking } from "./bookingService.js";
 import { cleanHumanReply } from "./russianSpeech.js";
 import {
@@ -154,6 +155,47 @@ function applyContextUpdate(state: SalesDialogState, update: Partial<SalesSessio
 /** Полная нормализация: использует v1-парсер с поддержкой 8XXX / +7XXX / 9XXX форматов. */
 function normalizePhone(raw: string): string | undefined {
   return normalizeRussianPhone(raw);
+}
+
+/** Сводка направлений с возрастными окнами — из реальных слотов (`src/data/slots.ts`).
+ *  Используется на шаге ask_direction чтобы LLM не предлагала направление,
+ *  которое не подходит по возрасту клиента. */
+function directionAgeWindowSummary(targetAge?: number): string {
+  // Группируем слоты по direction, собираем минимальный/максимальный возраст из тех что объявлены.
+  const dirInfo = new Map<string, { minAges: number[]; maxAges: number[]; levels: Set<string>; openEnded: boolean }>();
+  for (const s of allSlots) {
+    if (!s.clientVisible) continue;
+    const info = dirInfo.get(s.direction) ?? { minAges: [], maxAges: [], levels: new Set<string>(), openEnded: false };
+    if (s.level) info.levels.add(s.level);
+    if (s.ageMin !== undefined) info.minAges.push(s.ageMin);
+    if (s.ageMax !== undefined) info.maxAges.push(s.ageMax);
+    // Если у слота не задан ни ageMin ни ageMax — он открыт для всех возрастов.
+    if (s.ageMin === undefined && s.ageMax === undefined) info.openEnded = true;
+    dirInfo.set(s.direction, info);
+  }
+  const lines: string[] = [];
+  for (const [direction, info] of dirInfo) {
+    const minAge = info.minAges.length ? Math.min(...info.minAges) : undefined;
+    const maxAge = info.maxAges.length ? Math.max(...info.maxAges) : undefined;
+    // Если есть и open-ended и явные возраста — самые широкие границы.
+    let ageDesc: string;
+    if (info.openEnded && minAge === undefined && maxAge === undefined) ageDesc = "любой возраст";
+    else if (info.openEnded) ageDesc = `${minAge ?? 4}+ лет, есть и взрослые группы без верхнего ограничения`;
+    else if (minAge !== undefined && maxAge !== undefined) ageDesc = `${minAge}–${maxAge} лет`;
+    else if (minAge !== undefined) ageDesc = `от ${minAge} лет`;
+    else if (maxAge !== undefined) ageDesc = `до ${maxAge} лет`;
+    else ageDesc = "не указан";
+    // Помечаем подходит ли направление для targetAge.
+    let fitMark = "";
+    if (targetAge !== undefined) {
+      const fitsByMin = minAge === undefined || targetAge >= minAge || info.openEnded;
+      const fitsByMax = maxAge === undefined || targetAge <= maxAge || info.openEnded;
+      const fits = fitsByMin && fitsByMax;
+      fitMark = fits ? " ✓ ПОДХОДИТ" : " ✗ НЕ подходит по возрасту";
+    }
+    lines.push(`— ${direction}: ${ageDesc}${fitMark}`);
+  }
+  return lines.join("\n");
 }
 
 /** Извлечь цифры из текста: либо явные цифры, либо русские числительные ("восемь девять..."). */
@@ -336,7 +378,12 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
     }
   }
 
-  const systemPrompt = buildStepPrompt(step, context, availableSlots) + phoneBufferHint(incoming);
+  // На шаге выбора направления — добавляем реальные возрастные окна из расписания,
+  // чтобы LLM не предлагала Lady style для 8-летки и Детскую хореографию для 16-летки.
+  const directionsHint = step === "ask_direction"
+    ? `\n\nДОСТУПНЫЕ НАПРАВЛЕНИЯ И ВОЗРАСТНЫЕ ОКНА (из расписания):\n${directionAgeWindowSummary(incoming.age)}\n\nКРИТИЧНО: предлагай ТОЛЬКО направления с пометкой «✓ ПОДХОДИТ». Никогда не предлагай направление с «✗ НЕ подходит» — у нас просто нет такой группы для этого возраста.\n`
+    : "";
+  const systemPrompt = buildStepPrompt(step, context, availableSlots) + phoneBufferHint(incoming) + directionsHint;
   const userMessage = input.message?.trim() || "(клиент молчит)";
 
   // История разговора — без неё LLM забывает что только что предложил.
