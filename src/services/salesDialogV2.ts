@@ -232,6 +232,68 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
     availableSlots = picked.asAvailable;
   }
 
+  // Детерминированный путь для ask_consent — если телефон уже собран и клиент сказал «да/нет»,
+  // не зовём LLM (она ловится на повторный вопрос о телефоне). Сразу создаём бронь / handoff.
+  if (step === "ask_consent" && incoming.phone) {
+    const text = (input.message ?? "").toLowerCase().trim();
+    const yesPattern = /(?<![а-яёa-z])(?:да|ок|окей|конечно|согласен|согласна|можно|давай(?:те)?|хорошо|подойд(?:ёт|ет)|подходит|устраивает|годится|без\s+проблем|разреш)(?![а-яёa-z])/iu;
+    const noPattern = /(?<![а-яёa-z])(?:не\s*(?:т|нужно|надо|хочу|разреш|согласен|согласна)|откаж|нельзя|против)(?![а-яёa-z])/iu;
+    if (yesPattern.test(text) && !noPattern.test(text)) {
+      // Создаём бронь.
+      const slotId = incoming.selectedSlotId;
+      const slot = slotId ? getSlotById(slotId) : undefined;
+      let booking: Booking | undefined;
+      if (slot && incoming.customerName && incoming.direction && incoming.branch && incoming.branch !== "Черняховского") {
+        try {
+          booking = await createBooking({
+            customerName: incoming.customerName,
+            phone: incoming.phone,
+            age: incoming.age,
+            direction: incoming.direction,
+            branch: incoming.branch,
+            slotId: slot.id,
+            source: "inbound_call",
+            consent: { personalData: true, aiVoiceDisclosure: true, crossBorderTransfer: true },
+          });
+        } catch (err) {
+          console.error("[salesDialogV2] booking create failed (consent path):", err instanceof Error ? err.message : err);
+        }
+      }
+      const name = incoming.customerName ? `${incoming.customerName}, ` : "";
+      const dirName = incoming.direction ? `, направление ${slot?.direction ? slot.direction.toLowerCase() : incoming.direction.toLowerCase()}` : "";
+      const slotPart = slot ? `${slot.weekday} в ${slot.time}, филиал ${slot.branch}` : "";
+      const farewell = `${name}записала ${incoming.learnerType === "child" ? (incoming.childGender === "girl" ? "вашу дочку" : incoming.childGender === "boy" ? "вашего сына" : "ребёнка") : "вас"} на пробное — ${slotPart}${dirName}. Пробное 300 рублей, оплата на месте. Спасибо, будем ждать вас. Уверена, вам у нас понравится. До встречи!`;
+      const finalState: SalesDialogState = {
+        ...incoming,
+        personalDataConsent: true,
+        stage: "booked",
+        recentActions: [...(incoming.recentActions ?? []), "ask_consent"].slice(-10),
+      };
+      return {
+        reply: farewell,
+        state: finalState,
+        action: "booked",
+        booking,
+        brainSource: "v2_consent_finalize",
+      };
+    }
+    if (noPattern.test(text)) {
+      const name = incoming.customerName ? `${incoming.customerName}, ` : "";
+      const handoffReply = `${name}поняла, без проблем. Тогда передам ваши контакты администратору — он перезвонит и подтвердит запись.`;
+      try {
+        await recordHandoff({ reason: "consent_refused", state: incoming, lastUserText: input.message });
+      } catch (err) {
+        console.error("[salesDialogV2] handoff log failed (consent path):", err instanceof Error ? err.message : err);
+      }
+      return {
+        reply: handoffReply,
+        state: { ...incoming, personalDataConsent: false, stage: "handoff" },
+        action: "handoff",
+        brainSource: "v2_consent_refuse",
+      };
+    }
+  }
+
   // Серверное накопление цифр телефона между ходами. Понимает три формата:
   //   8XXXXXXXXXX (11 цифр с восьмёрки), +7XXXXXXXXXX, 9XXXXXXXXX (10 с девятки),
   //   а также русские числительные словами («восемь девять два...»).
