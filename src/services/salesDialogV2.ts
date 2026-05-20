@@ -19,6 +19,7 @@ import {
   type AvailableSlot,
 } from "./salesPromptSteps.js";
 import type { SalesDialogState, SalesDialogResult, SalesDialogInput } from "./salesDialog.js";
+import { extractRussianNumeralWordsAsDigits, normalizeRussianPhone } from "./salesDialog.js";
 import { recordHandoff } from "./handoffService.js";
 import type { SalesBrainAction } from "./openAiSalesBrain.js";
 
@@ -150,21 +151,19 @@ function applyContextUpdate(state: SalesDialogState, update: Partial<SalesSessio
   return next;
 }
 
-/** Простая нормализация телефона. Полная парсинг с числительными — в старом коде. */
+/** Полная нормализация: использует v1-парсер с поддержкой 8XXX / +7XXX / 9XXX форматов. */
 function normalizePhone(raw: string): string | undefined {
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length === 11 && (digits.startsWith("7") || digits.startsWith("8"))) {
-    return `+7${digits.slice(1)}`;
-  }
-  if (digits.length === 10 && digits.startsWith("9")) {
-    return `+7${digits}`;
-  }
-  return undefined;
+  return normalizeRussianPhone(raw);
 }
 
-/** Только цифры из произвольного текста (для накопления фрагментов телефона). */
-function digitsOnly(text: string): string {
-  return text.replace(/\D/g, "");
+/** Извлечь цифры из текста: либо явные цифры, либо русские числительные ("восемь девять..."). */
+function digitsFromAnyText(text: string): string {
+  // Сначала из явных цифр.
+  const directDigits = text.replace(/\D/g, "");
+  if (directDigits.length >= 3) return directDigits;
+  // Иначе — пробуем числительные словами.
+  const spelled = extractRussianNumeralWordsAsDigits(text);
+  return spelled || directDigits;
 }
 
 /** Подбираем слоты для текущего state — это вход в offer_slot шаг. */
@@ -233,15 +232,24 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
     availableSlots = picked.asAvailable;
   }
 
-  // Серверное накопление цифр телефона между ходами. Если клиент диктует частями
-  // (VAD режет на полу-номере) — копим в state.phoneDigitsBuffer и финализируем
-  // когда набрался полный номер. Это снимает LLM-петлю «не хватает цифр».
+  // Серверное накопление цифр телефона между ходами. Понимает три формата:
+  //   8XXXXXXXXXX (11 цифр с восьмёрки), +7XXXXXXXXXX, 9XXXXXXXXX (10 с девятки),
+  //   а также русские числительные словами («восемь девять два...»).
+  // VAD режет на полу-номере → копим в state.phoneDigitsBuffer.
   if (step === "ask_phone" && !incoming.phone) {
-    const inDigits = digitsOnly(input.message ?? "");
+    const inDigits = digitsFromAnyText(input.message ?? "");
     if (inDigits.length > 0) {
       const prevBuf = incoming.phoneDigitsBuffer ?? "";
-      const combined = (prevBuf + inDigits).slice(-12);
-      const phone = normalizePhone(combined);
+      // Сначала пробуем СВЕЖИЙ фрагмент как самостоятельный полный номер
+      // (клиент мог надиктовать всё сразу после фрагмента, не приписывая к предыдущему).
+      let phone = normalizePhone(inDigits);
+      let combinedForBuffer = inDigits;
+      if (!phone) {
+        // Не получился — пробуем как продолжение к буферу.
+        const combined = (prevBuf + inDigits).slice(-15);
+        phone = normalizePhone(combined);
+        combinedForBuffer = combined;
+      }
       if (phone) {
         // Полный номер собран — пропускаем LLM, сразу идём на ask_consent.
         const stateNoBuf: SalesDialogState = {
@@ -260,7 +268,7 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
         };
       } else {
         // Цифры накопились но недостаточно — обновляем буфер для следующего turn'а.
-        incoming.phoneDigitsBuffer = combined;
+        incoming.phoneDigitsBuffer = combinedForBuffer;
       }
     }
   }

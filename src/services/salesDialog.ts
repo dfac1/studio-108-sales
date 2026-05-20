@@ -2031,7 +2031,7 @@ export function _testNormalizeRussianPhone(digits: string): string | undefined {
   return normalizeRussianPhone(digits);
 }
 
-function extractRussianNumeralWordsAsDigits(text: string): string {
+export function extractRussianNumeralWordsAsDigits(text: string): string {
   const SINGLE: Record<string, number> = {
     "ноль": 0, "нуль": 0,
     "один": 1, "одну": 1, "одна": 1, "первый": 1,
@@ -2138,7 +2138,7 @@ function extractRussianNumeralWordsAsDigits(text: string): string {
   return out;
 }
 
-function normalizeRussianPhone(digitsRaw: string): string | undefined {
+export function normalizeRussianPhone(digitsRaw: string): string | undefined {
   const digits = digitsRaw.replace(/\D/g, "");
   if (digits.length < 10) return undefined;
 
