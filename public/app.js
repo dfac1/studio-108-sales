@@ -1149,9 +1149,13 @@ async function handleSpeechCaptured() {
   // и не успевает спасти ситуацию на медленных ходах (когда модель композит нетиповой ответ).
   // Раньше 3 сек — но с v2 + auto-continue brain отвечает 4-6 сек обычно, и sek.mp3 звучал
   // на каждом ходе, что раздражало.
+  //
+  // НЕ играем «секундочку» до того как бот вообще что-то сказал (completedTurns=0): клиент
+  // только включил микрофон, услышать «секундочку» до приветствия — странно.
   let lateThinkingFired = false;
   const lateThinkingTimer = setTimeout(() => {
     if (!voice.pendingTurn || voice.ttsPlaying) return;
+    if ((voice.completedTurns ?? 0) < 1) return;
     try {
       let audio = backchannelCache.get("late-sek");
       if (!audio) {
