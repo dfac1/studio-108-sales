@@ -75,6 +75,13 @@ function buildContext(state: SalesDialogState): SalesSessionContext {
   return ctx;
 }
 
+/** Дополнительный hint для LLM: сколько цифр уже накопилось в buffer'е. */
+function phoneBufferHint(state: SalesDialogState): string {
+  const buf = state.phoneDigitsBuffer;
+  if (!buf || buf.length === 0) return "";
+  return `\n\nКлиент уже продиктовал ${buf.length} цифр. Не хватает до полного номера (11 цифр с восьмёркой / плюс-семёркой или 10 с девятки). Не повторяй приветствие, просто скажи мягко: «Андрей, продолжайте — ещё несколько цифр» и жди продолжения.\n`;
+}
+
 /** Применяем contextUpdate из маркера LLM к state (с валидацией). */
 function applyContextUpdate(state: SalesDialogState, update: Partial<SalesSessionContext>): SalesDialogState {
   const next = { ...state };
@@ -143,6 +150,11 @@ function normalizePhone(raw: string): string | undefined {
   return undefined;
 }
 
+/** Только цифры из произвольного текста (для накопления фрагментов телефона). */
+function digitsOnly(text: string): string {
+  return text.replace(/\D/g, "");
+}
+
 /** Подбираем слоты для текущего state — это вход в offer_slot шаг. */
 function pickAvailableSlots(state: SalesDialogState): { slots: Slot[]; asAvailable: AvailableSlot[] } {
   if (!state.direction || !state.branch) return { slots: [], asAvailable: [] };
@@ -209,7 +221,39 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
     availableSlots = picked.asAvailable;
   }
 
-  const systemPrompt = buildStepPrompt(step, context, availableSlots);
+  // Серверное накопление цифр телефона между ходами. Если клиент диктует частями
+  // (VAD режет на полу-номере) — копим в state.phoneDigitsBuffer и финализируем
+  // когда набрался полный номер. Это снимает LLM-петлю «не хватает цифр».
+  if (step === "ask_phone" && !incoming.phone) {
+    const inDigits = digitsOnly(input.message ?? "");
+    if (inDigits.length > 0) {
+      const prevBuf = incoming.phoneDigitsBuffer ?? "";
+      const combined = (prevBuf + inDigits).slice(-12);
+      const phone = normalizePhone(combined);
+      if (phone) {
+        // Полный номер собран — пропускаем LLM, сразу идём на ask_consent.
+        const stateNoBuf: SalesDialogState = {
+          ...incoming,
+          phone,
+          phoneDigitsBuffer: undefined,
+          stage: "ask_consent",
+          recentActions: [...(incoming.recentActions ?? []), "ask_phone"].slice(-10),
+        };
+        const ack = `${incoming.customerName ? `${incoming.customerName}, ` : ""}записала номер. Могу сохранить ваши данные для подтверждения записи?`;
+        return {
+          reply: ack,
+          state: stateNoBuf,
+          action: "ask_consent",
+          brainSource: "v2_phone_accumulator",
+        };
+      } else {
+        // Цифры накопились но недостаточно — обновляем буфер для следующего turn'а.
+        incoming.phoneDigitsBuffer = combined;
+      }
+    }
+  }
+
+  const systemPrompt = buildStepPrompt(step, context, availableSlots) + phoneBufferHint(incoming);
   const userMessage = input.message?.trim() || "(клиент молчит)";
 
   // История разговора — без неё LLM забывает что только что предложил.

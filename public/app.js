@@ -885,7 +885,10 @@ function monitorRecordingVad() {
     const now = performance.now();
 
     // Принудительный стоп записи если она тянется слишком долго (защита от фоновых звуков ТВ/радио).
-    if (voice.recordingStartedAt && now - voice.recordingStartedAt > VAD.maxRecordingMs) {
+    // На шаге ask_phone клиент может медленно диктовать с долгими паузами — даём больше.
+    const stageForCap = state.dialog?.stage;
+    const maxRec = stageForCap === "ask_phone" ? 25000 : VAD.maxRecordingMs;
+    if (voice.recordingStartedAt && now - voice.recordingStartedAt > maxRec) {
       try { voice.recorder.stop(); } catch {}
       return;
     }
@@ -905,9 +908,10 @@ function monitorRecordingVad() {
         voice.silenceStartedAt = now;
       } else {
         // На шаге ask_phone клиент диктует цифры с паузами (8... 922... 653...) —
-        // обычный 1800мс silence отрезает на полу-фразе. Расширяем до 3500мс.
+        // обычный 1800мс silence отрезает на полу-фразе. Расширяем до 5000мс.
+        // 3500мс было мало — клиент задумывается между группами цифр на ~4 сек.
         const stage = state.dialog?.stage;
-        const effectiveSilenceMs = stage === "ask_phone" ? 3500 : VAD.silenceMs;
+        const effectiveSilenceMs = stage === "ask_phone" ? 5000 : VAD.silenceMs;
         if (now - voice.silenceStartedAt > effectiveSilenceMs && now - voice.speechStartedAt > VAD.minSpeechMs) {
           voice.continuousSpeechStartedAt = 0;
           stopActiveListening();
