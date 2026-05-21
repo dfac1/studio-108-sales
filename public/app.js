@@ -320,9 +320,11 @@ async function runStreamingTurn(message, signal) {
 
   // Fallback для детерминированных путей: consent finalize / phone accumulator / handoff
   // НЕ зовут LLM, поэтому onSentence не срабатывает — sentence-events не приходят.
-  // В этом случае весь reply есть только в final, играем его одним TTS-стримом.
-  // То же если сервер вернул pregeneratedAudioUrl — играем готовый mp3, без TTS.
-  if (!playbackStarted && finalResult.reply) {
+  // ВАЖНО: проверяем именно `pendingSentences.length`, а не `playbackStarted`.
+  // Sentence-event'ы могли уже прийти и зарегистрировать TTS-fetch'и, но fetch ещё
+  // не успел до первого байта дойти к моменту прихода final. По playbackStarted
+  // мы бы повторно сыграли весь reply поверх уже идущего стрима — дубль.
+  if (pendingSentences.length === 0 && finalResult.reply) {
     if (finalResult.pregeneratedAudioUrl) {
       try {
         const previous = elements.audioPlayer.src;
