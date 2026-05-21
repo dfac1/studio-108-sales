@@ -213,40 +213,76 @@ async function runStreamingTurn(message, signal) {
     sourceBuffer.addEventListener("updateend", () => { pumping = false; pump(); });
   }
 
-  // Последовательная очередь TTS-запросов. Если sentence #2 пришло пока #1 ещё качается —
-  // ставим в очередь, чтобы порядок воспроизведения сохранился.
-  let ttsChain = Promise.resolve();
-  function dispatchSentenceTts(sentenceText) {
-    ttsChain = ttsChain.then(async () => {
-      if (!supportsMse) {
-        // fallback — просто проиграть как одиночный mp3
-        try { await speakViaSimpleEndpoint(sentenceText); } catch (err) { console.warn("fallback tts failed", err); }
-        return;
-      }
-      await ensureMediaSource();
-      const resp = await fetch("/api/tts/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: sentenceText,
-          outputFormat: "mp3_44100_128",
-          voicePreset: presetFromStep(currentStep)
-        }),
-        signal: controller.signal
-      });
-      if (!resp.ok || !resp.body) { console.error("tts/stream non-ok", await resp.text().catch(() => "")); return; }
-      const reader = resp.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        queue.push(value);
+  // ПАРАЛЛЕЛЬНЫЕ TTS-запросы с in-order drain.
+  // Раньше fetch для sentence #2 ждал пока #1 полностью догрузится — это давало
+  // слышимый шов 400-600мс между предложениями (latency первого байта ElevenLabs).
+  // Теперь: каждое предложение получает свой fetch немедленно, чанки копятся
+  // в pendingSentences[i].chunks, а drain() сливает их в MediaSource queue
+  // СТРОГО В ПОРЯДКЕ ПРИХОДА ПРЕДЛОЖЕНИЙ. Пока #1 играет, #2 уже грузится в фон —
+  // шов между ними обычно исчезает.
+  const pendingSentences = [];       // [{ chunks: [], done: bool }]
+  let playingIndex = 0;
+  const sentencePromises = [];        // для финального await перед закрытием
+
+  function drain() {
+    while (playingIndex < pendingSentences.length) {
+      const current = pendingSentences[playingIndex];
+      while (current.chunks.length > 0) {
+        queue.push(current.chunks.shift());
         pump();
         if (!playbackStarted) {
           playbackStarted = true;
           elements.audioPlayer.play().catch(() => {});
         }
       }
-    }).catch((err) => { if (err?.name !== "AbortError") console.error("sentence tts failed", err); });
+      if (!current.done) return;     // ждём ещё чанков этого предложения
+      playingIndex++;                 // переходим к следующему
+    }
+  }
+
+  function dispatchSentenceTts(sentenceText) {
+    const entry = { chunks: [], done: false };
+    pendingSentences.push(entry);
+    const p = (async () => {
+      if (!supportsMse) {
+        try { await speakViaSimpleEndpoint(sentenceText); } catch (err) { console.warn("fallback tts failed", err); }
+        entry.done = true;
+        return;
+      }
+      await ensureMediaSource();
+      try {
+        const resp = await fetch("/api/tts/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: sentenceText,
+            outputFormat: "mp3_44100_128",
+            voicePreset: presetFromStep(currentStep)
+          }),
+          signal: controller.signal
+        });
+        if (!resp.ok || !resp.body) {
+          console.error("tts/stream non-ok", await resp.text().catch(() => ""));
+          entry.done = true;
+          drain();
+          return;
+        }
+        const reader = resp.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          entry.chunks.push(value);
+          drain();
+        }
+        entry.done = true;
+        drain();
+      } catch (err) {
+        if (err?.name !== "AbortError") console.error("sentence tts failed", err);
+        entry.done = true;
+        drain();
+      }
+    })();
+    sentencePromises.push(p);
   }
 
   // Читаем NDJSON: одна JSON-строка на строку.
@@ -303,8 +339,8 @@ async function runStreamingTurn(message, signal) {
     }
   }
 
-  // Ждём пока вся очередь TTS-запросов завершится, затем закрываем MediaSource.
-  await ttsChain.catch(() => {});
+  // Ждём пока ВСЕ параллельные TTS-запросы дойдут до конца, затем закрываем MediaSource.
+  await Promise.all(sentencePromises).catch(() => {});
   ended = true;
   pump();
 

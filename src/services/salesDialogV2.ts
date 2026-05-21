@@ -543,22 +543,41 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
         { role: "user" as const, content: userMessage },
         { role: "assistant" as const, content: cleanReply },
       ];
-      const r2 = await callAnthropicText({
-        model: config.anthropic.dialogModel,
-        system: prompt2,
-        history: history2,
-        user: "(продолжи: предложи ближайший подходящий слот из контекста)",
-        maxTokens: 350,
-        temperature: 0.6,
-        timeoutMs: config.anthropic.dialogTimeoutMs,
-        cacheTtl: config.anthropic.cacheTtl,
-      });
+      // Если onSentence-callback есть — стримим и auto-continue, иначе клиент
+      // в streaming-режиме услышит только первый вызов и тишину после («Хорошо.» → пусто).
+      const r2 = callbacks?.onSentence
+        ? await callAnthropicTextStream({
+            model: config.anthropic.dialogModel,
+            system: prompt2,
+            history: history2,
+            user: "(продолжи: предложи ближайший подходящий слот из контекста)",
+            maxTokens: 350,
+            temperature: 0.6,
+            timeoutMs: config.anthropic.dialogTimeoutMs,
+            cacheTtl: config.anthropic.cacheTtl,
+            onSentence: (sentence, idx) => {
+              // Прокидываем sentence-event клиенту, чтобы он добавил TTS этого
+              // предложения В ОЧЕРЕДЬ за уже играющим первым вызовом.
+              try { callbacks!.onSentence!(sentence, idx); } catch { /* ignore */ }
+            },
+          })
+        : await callAnthropicText({
+            model: config.anthropic.dialogModel,
+            system: prompt2,
+            history: history2,
+            user: "(продолжи: предложи ближайший подходящий слот из контекста)",
+            maxTokens: 350,
+            temperature: 0.6,
+            timeoutMs: config.anthropic.dialogTimeoutMs,
+            cacheTtl: config.anthropic.cacheTtl,
+          });
       console.log(JSON.stringify({
         tag: "perf",
         stage: "llm_auto_continue",
         step: "offer_slot",
         ms: r2.latencyMs,
         model: config.anthropic.dialogModel,
+        streaming: Boolean(callbacks?.onSentence),
         inTok: r2.inputTokens,
         outTok: r2.outputTokens,
         cacheRead: r2.cacheReadInputTokens,
