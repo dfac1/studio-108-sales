@@ -7,6 +7,7 @@ import { registerRoutes } from "./routes.js";
 import { ensureBackchannels } from "./services/backchannelService.js";
 import { ensurePreGeneratedReplies } from "./services/preGeneratedReplies.js";
 import { startElevenLabsKeepAlive } from "./services/elevenLabsKeepAlive.js";
+import { startAnthropicKeepAlive } from "./services/anthropicKeepAlive.js";
 
 const app = Fastify({
   logger: true
@@ -35,6 +36,11 @@ ensurePreGeneratedReplies()
 // и постоянный осмысленный User-Agent на всех запросах (см. elevenLabsKeepAlive.ts).
 startElevenLabsKeepAlive(45_000);
 app.log.info({ intervalMs: 45_000 }, "ElevenLabs keep-alive started");
+
+// То же для api.anthropic.com — без пинга idle TLS-сокет закрывался и первый
+// токен после паузы платил 200-500мс за хэндшейк (видели разбросы first_token до 3.4с).
+startAnthropicKeepAlive(45_000);
+app.log.info({ intervalMs: 45_000 }, "Anthropic keep-alive started");
 
 try {
   await app.listen({ port: config.port, host: config.host });

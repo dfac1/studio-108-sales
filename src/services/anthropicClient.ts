@@ -6,6 +6,21 @@ import { config } from "../config.js";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
+// Beta-флаг для 1h cache TTL. По умолчанию Anthropic даёт только 5m TTL,
+// для voice-сессий (где между ходами иногда >5 мин) короткий TTL даёт лишние
+// cache create операции. Beta-flag разблокирует "1h" значение в cache_control.ttl.
+const ANTHROPIC_EXTENDED_CACHE_BETA = "extended-cache-ttl-2025-04-11";
+
+function buildAnthropicHeaders(apiKey: string, cacheTtl: "5m" | "1h" | undefined, extraAccept?: string): Record<string, string> {
+  const h: Record<string, string> = {
+    "x-api-key": apiKey,
+    "anthropic-version": ANTHROPIC_VERSION,
+    "content-type": "application/json",
+  };
+  if (cacheTtl === "1h") h["anthropic-beta"] = ANTHROPIC_EXTENDED_CACHE_BETA;
+  if (extraAccept) h["accept"] = extraAccept;
+  return h;
+}
 
 export interface CacheUsage {
   inputTokens: number;
@@ -93,11 +108,7 @@ export async function callAnthropicText(req: AnthropicTextRequest): Promise<Anth
   try {
     const response = await fetch(ANTHROPIC_URL, {
       method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json"
-      },
+      headers: buildAnthropicHeaders(apiKey, req.cacheTtl),
       body: JSON.stringify({
         model: req.model,
         max_tokens: req.maxTokens ?? 350,
@@ -153,12 +164,7 @@ export async function callAnthropicTextStream(req: AnthropicStreamRequest): Prom
   try {
     const response = await fetch(ANTHROPIC_URL, {
       method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-        accept: "text/event-stream",
-      },
+      headers: buildAnthropicHeaders(apiKey, req.cacheTtl, "text/event-stream"),
       body: JSON.stringify({
         model: req.model,
         max_tokens: req.maxTokens ?? 350,
@@ -270,11 +276,7 @@ export async function callAnthropicTool<T>(req: AnthropicToolRequest<T>): Promis
   try {
     const response = await fetch(ANTHROPIC_URL, {
       method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json"
-      },
+      headers: buildAnthropicHeaders(apiKey, req.cacheTtl),
       body: JSON.stringify({
         model: req.model,
         max_tokens: req.maxTokens ?? 400,
