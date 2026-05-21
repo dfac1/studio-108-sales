@@ -5,6 +5,13 @@ const state = {
   lastAssistantReply: ""
 };
 
+// Streaming pipeline: при ?streaming=1 в URL клиент использует /api/voice/turn-stream
+// вместо /api/voice/turn. Сервер шлёт NDJSON: start → sentence(s) → final.
+// TTS для каждого предложения запускается сразу как только сервер его прислал —
+// первый аудио-байт пользователя достигает на ~1 сек раньше при длинных репликах.
+// По умолчанию off, чтобы основной поток оставался стабильным.
+const STREAMING_TURN_ENABLED = new URLSearchParams(location.search).get("streaming") === "1";
+
 const elements = {
   serverStatus: document.querySelector("#serverStatus"),
   leadForm: document.querySelector("#leadForm"),
@@ -115,6 +122,195 @@ async function requestAssistant(message, signal) {
   return response.json();
 }
 
+// Маппинг текущего шага диалога → voice preset для TTS. В streaming-режиме
+// preset нужен ДО прихода final-события, поэтому полагаемся на known step.
+function presetFromStep(step) {
+  switch (step) {
+    case "ask_name": return "greeting";
+    case "offer_slot": return "business";
+    case "ask_phone":
+    case "ask_consent": return "business";
+    case "handoff": return "empathic";
+    case "booked": return "joyful";
+    default: return "default";
+  }
+}
+
+// Streaming-вариант диалогового turn'а. Открывает NDJSON-стрим к /api/voice/turn-stream,
+// для каждого пришедшего предложения немедленно начинает TTS-стрим в общий MediaSource.
+// Возвращает финальный VoiceTurnResult (для обновления state/slots/booking).
+async function runStreamingTurn(message, signal) {
+  const lead = getLeadData();
+  const dialogPayload = {
+    ...state.dialog,
+    customerName: lead.customerName || state.dialog.customerName,
+    phone: lead.phone || state.dialog.phone,
+    age: Number.isFinite(lead.age) ? lead.age : state.dialog.age,
+    direction: lead.direction || state.dialog.direction,
+    branch: lead.branch || state.dialog.branch,
+    personalDataConsent: lead.consent.personalData || state.dialog.personalDataConsent,
+    aiVoiceDisclosure: lead.consent.aiVoiceDisclosure,
+    crossBorderTransfer: lead.consent.crossBorderTransfer,
+    lastInterruption: state.lastInterruption ?? undefined
+  };
+
+  const response = await fetch("/api/voice/turn-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, state: dialogPayload, providers: { stt: lead.sttProvider, tts: lead.ttsProvider } }),
+    signal
+  });
+  state.lastInterruption = null;
+  if (!response.ok || !response.body) {
+    throw new Error(await response.text().catch(() => "stream open failed"));
+  }
+
+  // Готовим один MediaSource на весь turn — все предложения добавляются в ту же очередь.
+  stopActiveStream();
+  const supportsMse = typeof MediaSource !== "undefined" && MediaSource.isTypeSupported && MediaSource.isTypeSupported("audio/mpeg");
+
+  const controller = new AbortController();
+  activeStreamAbort = controller;
+  if (signal) {
+    signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  let mediaSource = null;
+  let sourceBuffer = null;
+  const queue = [];
+  let ended = false;
+  let pumping = false;
+  let playbackStarted = false;
+  let currentStep = "ask_name";
+
+  function pump() {
+    if (!sourceBuffer || pumping) return;
+    if (sourceBuffer.updating) return;
+    if (queue.length === 0) {
+      if (ended && mediaSource && mediaSource.readyState === "open") {
+        try { mediaSource.endOfStream(); } catch {}
+      }
+      return;
+    }
+    pumping = true;
+    const chunk = queue.shift();
+    try { sourceBuffer.appendBuffer(chunk); } catch (err) {
+      console.error("appendBuffer failed", err);
+      pumping = false;
+    }
+  }
+
+  async function ensureMediaSource() {
+    if (mediaSource || !supportsMse) return;
+    mediaSource = new MediaSource();
+    activeMediaSource = mediaSource;
+    const previous = elements.audioPlayer.src;
+    elements.audioPlayer.src = URL.createObjectURL(mediaSource);
+    elements.audioPlayer.hidden = false;
+    if (previous && previous.startsWith("blob:")) URL.revokeObjectURL(previous);
+    await new Promise((resolve) => mediaSource.addEventListener("sourceopen", resolve, { once: true }));
+    sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
+    sourceBuffer.addEventListener("updateend", () => { pumping = false; pump(); });
+  }
+
+  // Последовательная очередь TTS-запросов. Если sentence #2 пришло пока #1 ещё качается —
+  // ставим в очередь, чтобы порядок воспроизведения сохранился.
+  let ttsChain = Promise.resolve();
+  function dispatchSentenceTts(sentenceText) {
+    ttsChain = ttsChain.then(async () => {
+      if (!supportsMse) {
+        // fallback — просто проиграть как одиночный mp3
+        try { await speakViaSimpleEndpoint(sentenceText); } catch (err) { console.warn("fallback tts failed", err); }
+        return;
+      }
+      await ensureMediaSource();
+      const resp = await fetch("/api/tts/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: sentenceText,
+          outputFormat: "mp3_44100_128",
+          voicePreset: presetFromStep(currentStep)
+        }),
+        signal: controller.signal
+      });
+      if (!resp.ok || !resp.body) { console.error("tts/stream non-ok", await resp.text().catch(() => "")); return; }
+      const reader = resp.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        queue.push(value);
+        pump();
+        if (!playbackStarted) {
+          playbackStarted = true;
+          elements.audioPlayer.play().catch(() => {});
+        }
+      }
+    }).catch((err) => { if (err?.name !== "AbortError") console.error("sentence tts failed", err); });
+  }
+
+  // Читаем NDJSON: одна JSON-строка на строку.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let finalResult = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let evt;
+      try { evt = JSON.parse(line); } catch { continue; }
+      if (evt.type === "start") {
+        currentStep = evt.currentStep || currentStep;
+      } else if (evt.type === "sentence" && typeof evt.text === "string") {
+        dispatchSentenceTts(evt.text);
+      } else if (evt.type === "final") {
+        finalResult = evt;
+        // Обновим currentStep по action для корректного preset на ещё-не-стартовавших TTS.
+        if (evt.action) currentStep = evt.state?.stage || currentStep;
+      } else if (evt.type === "error") {
+        throw new Error(evt.message || "stream error");
+      }
+    }
+  }
+
+  if (!finalResult) throw new Error("stream closed without final event");
+
+  // Fallback для детерминированных путей: consent finalize / phone accumulator / handoff
+  // НЕ зовут LLM, поэтому onSentence не срабатывает — sentence-events не приходят.
+  // В этом случае весь reply есть только в final, играем его одним TTS-стримом.
+  // То же если сервер вернул pregeneratedAudioUrl — играем готовый mp3, без TTS.
+  if (!playbackStarted && finalResult.reply) {
+    if (finalResult.pregeneratedAudioUrl) {
+      try {
+        const previous = elements.audioPlayer.src;
+        elements.audioPlayer.src = finalResult.pregeneratedAudioUrl;
+        elements.audioPlayer.hidden = false;
+        await elements.audioPlayer.play().catch(() => {});
+        if (previous && previous.startsWith("blob:")) URL.revokeObjectURL(previous);
+      } catch (err) {
+        console.warn("pregenerated fallback failed", err);
+        dispatchSentenceTts(finalResult.reply);
+      }
+    } else {
+      dispatchSentenceTts(finalResult.reply);
+    }
+  }
+
+  // Ждём пока вся очередь TTS-запросов завершится, затем закрываем MediaSource.
+  await ttsChain.catch(() => {});
+  ended = true;
+  pump();
+
+  return finalResult;
+}
+
 async function createBooking(slotId) {
   const lead = getLeadData();
   const slot = state.slots.find((candidate) => candidate.id === slotId);
@@ -175,6 +371,19 @@ elements.promptForm.addEventListener("submit", async (event) => {
   elements.transcriptInput.value = "";
 
   try {
+    if (STREAMING_TURN_ENABLED) {
+      // Streaming-режим: runStreamingTurn сам пушит TTS по предложению.
+      // Текст финальной реплики и slots/booking приходят в final-событии в конце.
+      const result = await runStreamingTurn(transcript);
+      state.dialog = result.state || {};
+      appendMessage("assistant", result.reply);
+      renderSlots(result.slots);
+      elements.bookingBox.className = "booking-box";
+      elements.bookingBox.textContent = result.booking ? `Запись создана: ${result.booking.customerName}, ${result.booking.phone}.` : "";
+      if (result.booking) elements.bookingBox.className = "booking-box success";
+      // TTS уже отыграл sentence-by-sentence — streamAssistantSpeech не вызываем.
+      return;
+    }
     const result = await requestAssistant(transcript);
     state.dialog = result.state || {};
     appendMessage("assistant", result.reply);
@@ -1172,7 +1381,14 @@ async function handleSpeechCaptured() {
 
   let result;
   try {
-    result = await requestAssistant(combinedTranscript, voice.pendingTurnAbort?.signal);
+    // Streaming-режим: runStreamingTurn сам пушит TTS по предложению, backchannel
+    // и thinkingDelayMs пропускаются (первый аудио-байт обычно через ~700-1000мс,
+    // искусственная задумчивость не нужна).
+    if (STREAMING_TURN_ENABLED) {
+      result = await runStreamingTurn(combinedTranscript, voice.pendingTurnAbort?.signal);
+    } else {
+      result = await requestAssistant(combinedTranscript, voice.pendingTurnAbort?.signal);
+    }
   } catch (error) {
     clearTimeout(lateThinkingTimer);
     if (error?.name === "AbortError") {
@@ -1205,19 +1421,25 @@ async function handleSpeechCaptured() {
   voice.bargeinFrames = 0;
   voice.pendingTurn = false;
   try {
-    // Если уже сыграл late-thinking filler (sek.mp3) — серверный pre-reply backchannel
-    // («понимаю», «поняла») станет вторым сэмплом подряд и режет слух. Пропускаем.
-    // Также пропускаем на самом первом ответе бота (completedTurns стало 1 чуть выше) —
-    // «понимаю» перед приветствием звучит абсурдно: бот ещё ничего не услышал, кроме «здравствуйте».
-    if (result.backchannel && !voice.bargein && !lateThinkingFired && voice.completedTurns > 1) {
-      await playBackchannel(result.backchannel);
-    }
-    if (result.thinkingDelayMs && result.thinkingDelayMs > 0 && !voice.bargein) {
-      await sleep(result.thinkingDelayMs);
-    }
-    if (!voice.bargein) {
-      await streamAssistantSpeech(result.reply, result.voicePreset, result.pregeneratedAudioUrl);
-      await waitForAudioEnd();
+    if (STREAMING_TURN_ENABLED) {
+      // TTS уже пошёл в runStreamingTurn по мере прихода предложений. Только дожидаемся
+      // конца воспроизведения; backchannel/thinkingDelay в streaming-режиме не применяем.
+      if (!voice.bargein) await waitForAudioEnd();
+    } else {
+      // Если уже сыграл late-thinking filler (sek.mp3) — серверный pre-reply backchannel
+      // («понимаю», «поняла») станет вторым сэмплом подряд и режет слух. Пропускаем.
+      // Также пропускаем на самом первом ответе бота (completedTurns стало 1 чуть выше) —
+      // «понимаю» перед приветствием звучит абсурдно: бот ещё ничего не услышал, кроме «здравствуйте».
+      if (result.backchannel && !voice.bargein && !lateThinkingFired && voice.completedTurns > 1) {
+        await playBackchannel(result.backchannel);
+      }
+      if (result.thinkingDelayMs && result.thinkingDelayMs > 0 && !voice.bargein) {
+        await sleep(result.thinkingDelayMs);
+      }
+      if (!voice.bargein) {
+        await streamAssistantSpeech(result.reply, result.voicePreset, result.pregeneratedAudioUrl);
+        await waitForAudioEnd();
+      }
     }
   } catch (error) {
     console.error("TTS failed", error);

@@ -2,7 +2,7 @@ import type { SalesDialogInput, SalesDialogResult, SalesDialogState } from "./sa
 import type { SemanticMode, SttProviderId, TtsProviderId } from "../types.js";
 import { config } from "../config.js";
 import { handleSalesDialog } from "./salesDialog.js";
-import { handleSalesDialogV2 } from "./salesDialogV2.js";
+import { handleSalesDialogV2, type SalesDialogStreamCallbacks } from "./salesDialogV2.js";
 
 /**
  * v2 — переписанное dialog-ядро по PSY-паттерну (см. salesPromptSteps.ts).
@@ -11,6 +11,15 @@ import { handleSalesDialogV2 } from "./salesDialogV2.js";
  * Откат: убрать переменную из Render Environment, рестарт ~30 сек.
  */
 const USE_DIALOG_V2 = process.env.USE_DIALOG_V2 === "true";
+
+/** Override искусственной «человеческой задумчивости» между распознанной репликой клиента
+ *  и началом TTS. Дефолтные значения 150-1100мс (см. pickThinkingDelayMs) маскируют LLM-латентность
+ *  и звучат живее, но для телефонии каждый лишний мс — это плохо. Установка `THINKING_DELAY_MS_OVERRIDE=0`
+ *  выключает паузу полностью на проде без изменения кода. Ставить любое неотрицательное число.
+ *  Streaming-pipeline эту паузу уже игнорирует на клиенте — этот override для legacy non-streaming пути. */
+const THINKING_DELAY_OVERRIDE = process.env.THINKING_DELAY_MS_OVERRIDE !== undefined
+  ? Math.max(0, Number(process.env.THINKING_DELAY_MS_OVERRIDE))
+  : undefined;
 import { getBackchannelKeyForAction, type BackchannelKey } from "./backchannelService.js";
 import { findPreGeneratedReply } from "./preGeneratedReplies.js";
 import { logConversationTurn, nextConversationId } from "./conversationLog.js";
@@ -66,6 +75,10 @@ function pickVoicePreset(action: string, lastUserText: string): VoicePreset {
 }
 
 function pickThinkingDelayMs(action: string, message: string): number {
+  // Env-override: позволяет на проде выключить искусственную задумчивость без правок кода.
+  if (THINKING_DELAY_OVERRIDE !== undefined && Number.isFinite(THINKING_DELAY_OVERRIDE)) {
+    return THINKING_DELAY_OVERRIDE;
+  }
   // Длительная "обдумка" нужна только на содержательных шагах, где клиент дал
   // существенный input. На технических переходах — почти моментально.
   if (action === "booked" || action === "handoff") return 200;
@@ -82,17 +95,36 @@ function pickThinkingDelayMs(action: string, message: string): number {
   return 350 + Math.floor(Math.random() * 250);
 }
 
-export async function handleVoiceTurn(input: VoiceTurnInput): Promise<VoiceTurnResult> {
+export interface VoiceTurnStreamCallbacks {
+  /** Эмитится один раз, до похода в LLM — несёт meta (conversationId, turnIndex, currentStep).
+   *  Используется turn-stream роутом чтобы клиент мог сразу начать показывать UI. */
+  onStart?: (meta: { conversationId: string; turnIndex: number; currentStep: string }) => void;
+  /** Эмитится для каждого законченного предложения из LLM-стрима. Пропускается мимо
+   *  на детерминированных путях (consent finalize, phone accumulator, fallback) — там
+   *  весь reply придёт в финальном событии. */
+  onSentence?: (sentence: string, index: number) => void;
+}
+
+export async function handleVoiceTurn(input: VoiceTurnInput, callbacks?: VoiceTurnStreamCallbacks): Promise<VoiceTurnResult> {
   const startedAt = Date.now();
   const conversationId = nextConversationId(input.state);
   const turnIndex = (input.state?.turnIndex ?? 0) + 1;
+
+  callbacks?.onStart?.({
+    conversationId,
+    turnIndex,
+    currentStep: (input.state?.stage as string) ?? "ask_name",
+  });
 
   const dialogInput: SalesDialogInput = {
     message: input.message,
     state: input.state
   };
+  const dialogCallbacks: SalesDialogStreamCallbacks | undefined = callbacks?.onSentence
+    ? { onSentence: callbacks.onSentence }
+    : undefined;
   const result = USE_DIALOG_V2
-    ? await handleSalesDialogV2(dialogInput)
+    ? await handleSalesDialogV2(dialogInput, dialogCallbacks)
     : await handleSalesDialog(dialogInput);
 
   // Compact один-строковый лог для отладки через Render Logs API. Без него не видно
@@ -167,6 +199,19 @@ export async function handleVoiceTurn(input: VoiceTurnInput): Promise<VoiceTurnR
   });
 
   const pregenerated = findPreGeneratedReply(result.reply);
+
+  console.log(JSON.stringify({
+    tag: "perf",
+    stage: "turn",
+    conv: conversationId,
+    t: turnIndex,
+    ms: Date.now() - startedAt,
+    action: result.action,
+    src: result.brainSource,
+    pregen: Boolean(pregenerated?.url),
+    thinkMs: thinkingDelayMs,
+    bc: backchannel,
+  }));
 
   // Reply, который возвращаем в JSON клиенту — без audio-тегов:
   // в чате они выглядят как литералы «[мягко]», а в TTS пойдёт уже отдельный поток.

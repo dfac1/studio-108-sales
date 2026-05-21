@@ -160,6 +160,53 @@ export async function registerRoutes(app: FastifyInstance) {
     return handleVoiceTurn(body);
   });
 
+  // Streaming-вариант /api/voice/turn. NDJSON (одна JSON-строка на строку).
+  // События:
+  //   {"type":"start","conversationId","turnIndex","currentStep"}
+  //   {"type":"sentence","text","index"}   — по мере прихода от Claude
+  //   {"type":"final", ... весь VoiceTurnResult ... }
+  //   {"type":"error","message"}           — в случае ошибки внутри handler'а
+  // Контракт response.body совместим со старым app.js'ным fetch-reader'ом: одна строка = одно событие.
+  app.post("/api/voice/turn-stream", async (request, reply) => {
+    const body = z.object({
+      message: z.string().default(""),
+      state: z.record(z.string(), z.unknown()).optional(),
+      providers: z.object({
+        stt: z.enum(["elevenlabs", "yandex"]).optional(),
+        tts: z.enum(["elevenlabs", "yandex"]).optional()
+      }).optional(),
+      meta: z.object({
+        sttProvider: z.string().optional(),
+        sttConfidence: z.number().optional(),
+        sttDurationMs: z.number().optional()
+      }).optional()
+    }).parse(request.body);
+
+    reply.raw.writeHead(200, {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+
+    const write = (evt: Record<string, unknown>) => {
+      try { reply.raw.write(JSON.stringify(evt) + "\n"); } catch { /* client gone */ }
+    };
+
+    try {
+      const result = await handleVoiceTurn(body, {
+        onStart: (meta) => write({ type: "start", ...meta }),
+        onSentence: (text, index) => write({ type: "sentence", text, index })
+      });
+      write({ type: "final", ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      write({ type: "error", message });
+    } finally {
+      reply.raw.end();
+    }
+  });
+
   app.post("/api/sales-dialog/message", async (request) => {
     const body = z.object({
       message: z.string().default(""),
@@ -293,8 +340,10 @@ export async function registerRoutes(app: FastifyInstance) {
       sampleRateHertz: z.number().int().positive().optional()
     }).parse(request.body);
 
+    const startedAt = Date.now();
+    const audioBytes = Math.floor(body.audioBase64.length * 0.75);
     try {
-      return await transcribeSpeech({
+      const result = await transcribeSpeech({
         provider: body.provider,
         audio: Buffer.from(body.audioBase64, "base64"),
         mimeType: body.mimeType,
@@ -303,13 +352,30 @@ export async function registerRoutes(app: FastifyInstance) {
         formatHint: body.formatHint,
         sampleRateHertz: body.sampleRateHertz
       });
+      console.log(JSON.stringify({
+        tag: "perf",
+        stage: "stt",
+        ms: Date.now() - startedAt,
+        provider: result.provider,
+        audioBytes,
+        textLen: result.text.length,
+      }));
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось распознать аудио.";
+      console.log(JSON.stringify({
+        tag: "perf",
+        stage: "stt_error",
+        ms: Date.now() - startedAt,
+        provider: body.provider,
+        audioBytes,
+        err: message,
+      }));
       app.log.error({
         provider: body.provider,
         mimeType: body.mimeType,
         fileName: body.fileName,
-        audioBytes: body.audioBase64 ? Math.floor(body.audioBase64.length * 0.75) : 0,
+        audioBytes,
         err: message
       }, "stt failed");
       return reply.code(400).send({ error: message });
@@ -334,6 +400,9 @@ export async function registerRoutes(app: FastifyInstance) {
       outputFormat
     });
 
+    const startedAt = Date.now();
+    const textLen = body.text.length;
+
     // Слой 3: кэш-проверка ПЕРЕД походом в ElevenLabs.
     // Если этот же текст с тем же голосом/пресетом уже синтезировался — отдаём mp3 с диска,
     // без сетевого запроса. Покрывает повторы шаблонных реплик (ask_branch, ask_phone и т.п.).
@@ -344,6 +413,12 @@ export async function registerRoutes(app: FastifyInstance) {
         reply.header("Cache-Control", "no-cache");
         reply.header("X-Output-Format", outputFormat);
         reply.header("X-TTS-Cache", "hit");
+        console.log(JSON.stringify({
+          tag: "perf",
+          stage: "tts_cache_hit",
+          ms: Date.now() - startedAt,
+          textLen,
+        }));
         return reply.send(cached);
       }
     } catch {
@@ -368,7 +443,19 @@ export async function registerRoutes(app: FastifyInstance) {
       // PassThrough транслирует данные клиенту и копит в Buffer для последующей записи.
       const chunks: Buffer[] = [];
       const passthrough = new PassThrough();
+      let firstByteLogged = false;
       result.stream.on("data", (chunk: Buffer) => {
+        if (!firstByteLogged) {
+          firstByteLogged = true;
+          console.log(JSON.stringify({
+            tag: "perf",
+            stage: "tts_first_byte",
+            ms: Date.now() - startedAt,
+            textLen,
+            preset: body.voicePreset ?? "default",
+            action: body.action,
+          }));
+        }
         chunks.push(chunk);
         passthrough.write(chunk);
       });
@@ -376,6 +463,15 @@ export async function registerRoutes(app: FastifyInstance) {
         passthrough.end();
         if (chunks.length) {
           const audio = Buffer.concat(chunks);
+          console.log(JSON.stringify({
+            tag: "perf",
+            stage: "tts_end",
+            ms: Date.now() - startedAt,
+            textLen,
+            bytes: audio.length,
+            preset: body.voicePreset ?? "default",
+            action: body.action,
+          }));
           // Не блокируем ответ — пишем в кэш фоном.
           void writeTtsCache(cacheHash, audio).catch((err) => {
             request.log.warn({ err: err instanceof Error ? err.message : String(err) }, "tts cache write failed");
@@ -383,11 +479,25 @@ export async function registerRoutes(app: FastifyInstance) {
         }
       });
       result.stream.on("error", (err) => {
+        console.log(JSON.stringify({
+          tag: "perf",
+          stage: "tts_error",
+          ms: Date.now() - startedAt,
+          textLen,
+          err: err instanceof Error ? err.message : String(err),
+        }));
         passthrough.destroy(err);
       });
       return reply.send(passthrough);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось стримить речь.";
+      console.log(JSON.stringify({
+        tag: "perf",
+        stage: "tts_error",
+        ms: Date.now() - startedAt,
+        textLen,
+        err: message,
+      }));
       return reply.code(400).send({ error: message });
     }
   });

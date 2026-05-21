@@ -6,7 +6,12 @@
 
 import { config } from "../config.js";
 import type { Slot, Booking, Branch } from "../types.js";
-import { callAnthropicText, isAnthropicConfigured } from "./anthropicClient.js";
+import { callAnthropicText, callAnthropicTextStream, isAnthropicConfigured } from "./anthropicClient.js";
+
+/** Streaming-режим Anthropic. При USE_LLM_STREAMING=true внутри ходим тем же контрактом,
+ *  но логируем `llm_first_token` / `llm_first_sentence`. Контракт ответа caller'у не меняется.
+ *  Откат: убрать env var, рестарт ~30 сек. */
+const USE_LLM_STREAMING = process.env.USE_LLM_STREAMING === "true";
 import { findSlots, getSlotById } from "./slotService.js";
 import { slots as allSlots } from "../data/slots.js";
 import { createBooking } from "./bookingService.js";
@@ -254,7 +259,15 @@ function fallbackReply(step: StepId, state: SalesDialogState): string {
   }
 }
 
-export async function handleSalesDialogV2(input: SalesDialogInput): Promise<SalesDialogResult> {
+export interface SalesDialogStreamCallbacks {
+  /** Срабатывает на каждое законченное предложение из LLM-стрима.
+   *  Если задан — handleSalesDialogV2 принудительно использует streaming Claude,
+   *  даже если USE_LLM_STREAMING=false. Caller (route turn-stream) использует это
+   *  чтобы пушить sentence-event'ы в NDJSON клиенту по мере генерации. */
+  onSentence?: (sentence: string, index: number) => void;
+}
+
+export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: SalesDialogStreamCallbacks): Promise<SalesDialogResult> {
   const incoming: SalesDialogState = {
     aiVoiceDisclosure: true,
     crossBorderTransfer: true,
@@ -402,16 +415,58 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
 
   if (isAnthropicConfigured()) {
     try {
-      const result = await callAnthropicText({
-        model: config.anthropic.dialogModel,
-        system: systemPrompt,
-        history,
-        user: userMessage,
-        maxTokens: 500,
-        temperature: 0.7,
-        timeoutMs: config.anthropic.dialogTimeoutMs,
-        cacheTtl: config.anthropic.cacheTtl,
-      });
+      let firstTokenMs = 0;
+      let firstSentenceMs = 0;
+      const callStart = Date.now();
+      const streamingMode = USE_LLM_STREAMING || Boolean(callbacks?.onSentence);
+      const result = streamingMode
+        ? await callAnthropicTextStream({
+            model: config.anthropic.dialogModel,
+            system: systemPrompt,
+            history,
+            user: userMessage,
+            maxTokens: 500,
+            temperature: 0.7,
+            timeoutMs: config.anthropic.dialogTimeoutMs,
+            cacheTtl: config.anthropic.cacheTtl,
+            onFirstToken: (delta) => {
+              firstTokenMs = delta;
+              console.log(JSON.stringify({
+                tag: "perf",
+                stage: "llm_first_token",
+                step,
+                ms: delta,
+                model: config.anthropic.dialogModel,
+              }));
+            },
+            onSentence: (sentence, idx) => {
+              if (idx === 0) {
+                firstSentenceMs = Date.now() - callStart;
+                console.log(JSON.stringify({
+                  tag: "perf",
+                  stage: "llm_first_sentence",
+                  step,
+                  ms: firstSentenceMs,
+                  firstTokenMs,
+                  preview: sentence.slice(0, 60),
+                }));
+              }
+              // Прокидываем sentence наружу (для турн-стрим NDJSON роута).
+              // Любой throw из callback'а проглатываем — стрим LLM не должен падать
+              // из-за того, что клиент отвалился от NDJSON.
+              try { callbacks?.onSentence?.(sentence, idx); } catch { /* ignore */ }
+            },
+          })
+        : await callAnthropicText({
+            model: config.anthropic.dialogModel,
+            system: systemPrompt,
+            history,
+            user: userMessage,
+            maxTokens: 500,
+            temperature: 0.7,
+            timeoutMs: config.anthropic.dialogTimeoutMs,
+            cacheTtl: config.anthropic.cacheTtl,
+          });
       llmReply = result.text;
       brainCache = {
         inputTokens: result.inputTokens,
@@ -419,6 +474,20 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
         cacheCreationInputTokens: result.cacheCreationInputTokens,
         cacheReadInputTokens: result.cacheReadInputTokens,
       };
+      console.log(JSON.stringify({
+        tag: "perf",
+        stage: "llm",
+        step,
+        ms: result.latencyMs,
+        model: config.anthropic.dialogModel,
+        streaming: streamingMode,
+        firstTokenMs: firstTokenMs || undefined,
+        firstSentenceMs: firstSentenceMs || undefined,
+        inTok: result.inputTokens,
+        outTok: result.outputTokens,
+        cacheRead: result.cacheReadInputTokens,
+        cacheCreate: result.cacheCreationInputTokens,
+      }));
     } catch (err) {
       console.error("[salesDialogV2] anthropic call failed:", err instanceof Error ? err.message : err);
       llmReply = fallbackReply(step, incoming);
@@ -484,6 +553,16 @@ export async function handleSalesDialogV2(input: SalesDialogInput): Promise<Sale
         timeoutMs: config.anthropic.dialogTimeoutMs,
         cacheTtl: config.anthropic.cacheTtl,
       });
+      console.log(JSON.stringify({
+        tag: "perf",
+        stage: "llm_auto_continue",
+        step: "offer_slot",
+        ms: r2.latencyMs,
+        model: config.anthropic.dialogModel,
+        inTok: r2.inputTokens,
+        outTok: r2.outputTokens,
+        cacheRead: r2.cacheReadInputTokens,
+      }));
       const transition2 = parseTransition(r2.text);
       const reply2 = cleanHumanReply(stripTransitionMarker(r2.text));
       if (reply2) {
