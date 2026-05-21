@@ -12,6 +12,13 @@ const state = {
 // По умолчанию off, чтобы основной поток оставался стабильным.
 const STREAMING_TURN_ENABLED = new URLSearchParams(location.search).get("streaming") === "1";
 
+// Адаптивный VAD silence: при ?fastVad=1 клиент использует короткие silence-окна
+// на шагах где ожидаемый ответ короткий («Андрей», «озеро», «да»). Это режет
+// ~1000мс на каждом таком ходе. Не зависит от streaming. ask_phone остаётся 5000мс
+// (медленная диктовка цифр). Resume-watchdog подхватывает случаи когда клиент
+// возобновил речь после паузы — короткое окно не приводит к обрезке мысли.
+const FAST_VAD_ENABLED = new URLSearchParams(location.search).get("fastVad") === "1";
+
 const elements = {
   serverStatus: document.querySelector("#serverStatus"),
   leadForm: document.querySelector("#leadForm"),
@@ -705,6 +712,34 @@ const voice = {
   sttDoneAt: 0
 };
 
+// Per-step silenceMs lookup для режима fastVad. Включается ?fastVad=1.
+// Числа подобраны под ожидаемую длину ответа клиента: чем короче ожидаемый ответ,
+// тем меньше можно ждать тишины. Resume-watchdog компенсирует случаи когда клиент
+// после паузы продолжил мысль — мы отменяем in-flight, копим префикс, склеиваем.
+// ВАЖНО: ask_phone оставляем 5000мс — клиенты диктуют цифры группами с паузами 3-4 сек.
+// Все значения >= 500мс safety floor — на случай микро-пропусков в речи между словами.
+const FAST_VAD_SILENCE_MS_BY_STEP = {
+  ask_name: 700,        // «Андрей», «Анна»
+  ask_learner: 800,     // «себе», «дочке»
+  ask_age: 900,         // «8», «восемь лет»
+  ask_direction: 1200,  // 1-3 слова, иногда фраза с уточнением
+  ask_branch: 800,      // «озеро», «развилка», «возле первой школы»
+  offer_slot: 1200,     // «подходит», «нет, другой день», возражение
+  ask_consent: 700,     // «да», «согласна», «нет»
+  ask_phone: 5000       // НЕ ТРОГАТЬ — медленная диктовка, см. resume-watchdog
+};
+const FAST_VAD_DEFAULT_MS = 1200; // если stage неизвестен в FAST режиме — между коротким и старым 1800
+const VAD_SAFETY_FLOOR_MS = 500;  // ни при каких условиях не меньше — защита от микро-пропусков
+
+function pickSilenceMs(stage) {
+  // Без флага — старое поведение: 5000 на ask_phone, 1800 на всём остальном.
+  if (!FAST_VAD_ENABLED) {
+    return stage === "ask_phone" ? 5000 : VAD.silenceMs;
+  }
+  const ms = FAST_VAD_SILENCE_MS_BY_STEP[stage] ?? FAST_VAD_DEFAULT_MS;
+  return Math.max(VAD_SAFETY_FLOOR_MS, ms);
+}
+
 const VAD = {
   speechRms: 0.035,             // порог запуска записи в режиме «слушаю» — выше тихого фона
   // 1800мс — даём клиенту достаточно времени думать.
@@ -1154,11 +1189,11 @@ function monitorRecordingVad() {
       if (voice.silenceStartedAt === 0) {
         voice.silenceStartedAt = now;
       } else {
-        // На шаге ask_phone клиент диктует цифры с паузами (8... 922... 653...) —
-        // обычный 1800мс silence отрезает на полу-фразе. Расширяем до 5000мс.
-        // 3500мс было мало — клиент задумывается между группами цифр на ~4 сек.
+        // Per-step silence окно (см. pickSilenceMs). Без ?fastVad=1 — 1800мс везде / 5000мс на ask_phone.
+        // С ?fastVad=1 — короткие окна на коротких шагах (ask_name/branch/consent: 700-900мс);
+        // ask_phone всегда 5000мс. Resume-watchdog компенсирует ложные срабатывания.
         const stage = state.dialog?.stage;
-        const effectiveSilenceMs = stage === "ask_phone" ? 5000 : VAD.silenceMs;
+        const effectiveSilenceMs = pickSilenceMs(stage);
         if (now - voice.silenceStartedAt > effectiveSilenceMs && now - voice.speechStartedAt > VAD.minSpeechMs) {
           voice.continuousSpeechStartedAt = 0;
           stopActiveListening();
