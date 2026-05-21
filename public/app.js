@@ -12,12 +12,13 @@ const state = {
 // По умолчанию off, чтобы основной поток оставался стабильным.
 const STREAMING_TURN_ENABLED = new URLSearchParams(location.search).get("streaming") === "1";
 
-// Адаптивный VAD silence: при ?fastVad=1 клиент использует короткие silence-окна
-// на шагах где ожидаемый ответ короткий («Андрей», «озеро», «да»). Это режет
-// ~1000мс на каждом таком ходе. Не зависит от streaming. ask_phone остаётся 5000мс
+// Адаптивный VAD silence: ВКЛЮЧЁН ПО УМОЛЧАНИЮ. Использует короткие silence-окна
+// на шагах где ожидаемый ответ короткий («Андрей», «озеро», «да»). Режет ~1000мс
+// на каждом таком ходе. Не зависит от streaming. ask_phone остаётся 5000мс
 // (медленная диктовка цифр). Resume-watchdog подхватывает случаи когда клиент
 // возобновил речь после паузы — короткое окно не приводит к обрезке мысли.
-const FAST_VAD_ENABLED = new URLSearchParams(location.search).get("fastVad") === "1";
+// Аварийный откат: ?fastVad=0 в URL вернёт старое поведение (1800мс везде).
+const FAST_VAD_ENABLED = new URLSearchParams(location.search).get("fastVad") !== "0";
 
 const elements = {
   serverStatus: document.querySelector("#serverStatus"),
