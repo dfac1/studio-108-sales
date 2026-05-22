@@ -294,30 +294,60 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
     const yesPattern = /(?<![а-яёa-z])(?:да|ок|окей|конечно|согласен|согласна|можно|давай(?:те)?|хорошо|подойд(?:ёт|ет)|подходит|устраивает|годится|без\s+проблем|разреш)(?![а-яёa-z])/iu;
     const noPattern = /(?<![а-яёa-z])(?:не\s*(?:т|нужно|надо|хочу|разреш|согласен|согласна)|откаж|нельзя|против)(?![а-яёa-z])/iu;
     if (yesPattern.test(text) && !noPattern.test(text)) {
-      // Создаём бронь.
       const slotId = incoming.selectedSlotId;
       const slot = slotId ? getSlotById(slotId) : undefined;
-      let booking: Booking | undefined;
-      if (slot && incoming.customerName && incoming.direction && incoming.branch && incoming.branch !== "Черняховского") {
+      const hasAllRequirements = Boolean(slot && incoming.customerName && incoming.direction && incoming.branch && incoming.branch !== "Черняховского");
+
+      // Bug #1 fix: если на consent дошли БЕЗ выбранного слота (LLM проскочила
+      // offer_slot — видели в stream/multi-fact-first), не создаём бронь с пустой
+      // строкой в farewell («записала на пробное — , направление ...»).
+      // Передаём админу, он подберёт слот руками. Consent сохраняем (клиент согласился).
+      if (!hasAllRequirements) {
+        const name = incoming.customerName ? `${incoming.customerName}, ` : "";
+        const handoffReply = `${name}спасибо! Сейчас передам ваши контакты администратору — он перезвонит, уточнит удобное время и подтвердит запись.`;
         try {
-          booking = await createBooking({
-            customerName: incoming.customerName,
-            phone: incoming.phone,
-            age: incoming.age,
-            direction: incoming.direction,
-            branch: incoming.branch,
-            slotId: slot.id,
-            source: "inbound_call",
-            consent: { personalData: true, aiVoiceDisclosure: true, crossBorderTransfer: true },
+          await recordHandoff({
+            reason: !slot ? "consent_without_slot" : "consent_missing_required_fields",
+            state: { ...incoming, personalDataConsent: true },
+            lastUserText: input.message
           });
         } catch (err) {
-          console.error("[salesDialogV2] booking create failed (consent path):", err instanceof Error ? err.message : err);
+          console.error("[salesDialogV2] handoff log failed (no slot at consent):", err instanceof Error ? err.message : err);
         }
+        console.warn(JSON.stringify({
+          tag: "guard",
+          reason: "consent_without_slot",
+          hasSlot: Boolean(slot), hasName: Boolean(incoming.customerName),
+          hasDirection: Boolean(incoming.direction), branch: incoming.branch
+        }));
+        return {
+          reply: handoffReply,
+          state: { ...incoming, personalDataConsent: true, stage: "handoff" },
+          action: "handoff",
+          brainSource: "v2_consent_no_slot_handoff",
+        };
+      }
+
+      // Создаём бронь — все требования выполнены.
+      let booking: Booking | undefined;
+      try {
+        booking = await createBooking({
+          customerName: incoming.customerName!,
+          phone: incoming.phone,
+          age: incoming.age,
+          direction: incoming.direction!,
+          branch: incoming.branch!,
+          slotId: slot!.id,
+          source: "inbound_call",
+          consent: { personalData: true, aiVoiceDisclosure: true, crossBorderTransfer: true },
+        });
+      } catch (err) {
+        console.error("[salesDialogV2] booking create failed (consent path):", err instanceof Error ? err.message : err);
       }
       const name = incoming.customerName ? `${incoming.customerName}, ` : "";
-      const dirSpoken = incoming.direction ? directionForSpeech(slot?.direction ?? incoming.direction) : "";
+      const dirSpoken = directionForSpeech(slot!.direction ?? incoming.direction!);
       const dirName = dirSpoken ? `, направление ${dirSpoken}` : "";
-      const slotPart = slot ? `${slot.weekday} в ${slot.time}, филиал ${slot.branch}` : "";
+      const slotPart = `${slot!.weekday} в ${slot!.time}, филиал ${slot!.branch}`;
       const farewell = `${name}записала ${incoming.learnerType === "child" ? (incoming.childGender === "girl" ? "вашу дочку" : incoming.childGender === "boy" ? "вашего сына" : "ребёнка") : "вас"} на пробное — ${slotPart}${dirName}. Пробное 300 рублей, оплата на месте. Спасибо, будем ждать вас. Уверена, вам у нас понравится. До встречи!`;
       const finalState: SalesDialogState = {
         ...incoming,

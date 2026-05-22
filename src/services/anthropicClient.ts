@@ -22,6 +22,33 @@ function buildAnthropicHeaders(apiKey: string, cacheTtl: "5m" | "1h" | undefined
   return h;
 }
 
+// Anthropic в часы пик отдаёт overloaded_error / 529 / 502 спорадически.
+// Один retry через 600мс часто проходит — окна перегрузки короткие.
+// Это второй слой обороны под salesDialogV2 fallback'ом: до того как мы свалимся
+// в детерминированную fallbackReply, повторим вызов сами.
+function isTransientAnthropicError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /overloaded|rate.?limit|too.?many|status\s+(429|5\d\d)|stream\s+error|empty body|ECONNRESET|ETIMEDOUT|aborted/i.test(msg);
+}
+
+async function withTransientRetry<T>(fn: () => Promise<T>, label: string, backoffMs: number = 600): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isTransientAnthropicError(err)) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(JSON.stringify({ tag: "anthropic_retry", label, after: 0, errMsg: msg.slice(0, 200) }));
+    await new Promise((r) => setTimeout(r, backoffMs));
+    try {
+      return await fn();
+    } catch (err2) {
+      const msg2 = err2 instanceof Error ? err2.message : String(err2);
+      console.warn(JSON.stringify({ tag: "anthropic_retry_failed", label, errMsg: msg2.slice(0, 200) }));
+      throw err2;
+    }
+  }
+}
+
 export interface CacheUsage {
   inputTokens: number;
   outputTokens: number;
@@ -98,6 +125,11 @@ export function isAnthropicConfigured(): boolean {
 }
 
 export async function callAnthropicText(req: AnthropicTextRequest): Promise<AnthropicTextResult> {
+  // Безопасно ретраить: нет stateful callbacks, ничего наружу не утекло до return.
+  return withTransientRetry(() => callAnthropicTextOnce(req), "callAnthropicText");
+}
+
+async function callAnthropicTextOnce(req: AnthropicTextRequest): Promise<AnthropicTextResult> {
   const apiKey = config.anthropic.apiKey;
   if (!apiKey) throw new Error("Anthropic API key не настроен.");
 

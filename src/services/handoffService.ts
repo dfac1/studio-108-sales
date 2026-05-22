@@ -13,6 +13,8 @@ export type HandoffReason =
   | "underage"
   | "no_slots"
   | "consent_refused"
+  | "consent_without_slot"
+  | "consent_missing_required_fields"
   | "clarify_max"
   | "manual";
 
@@ -112,6 +114,8 @@ function buildHandoffSummary(reason: HandoffReason, state: SalesDialogState): st
     underage: "слишком маленький ребёнок (младше 4 лет)",
     no_slots: "нет подходящих свободных слотов в расписании",
     consent_refused: "клиент отказался от обработки данных",
+    consent_without_slot: "клиент согласился, но слот не был выбран — подобрать вручную",
+    consent_missing_required_fields: "клиент согласился, но не хватает данных для брони — уточнить",
     clarify_max: "не удалось расслышать клиента",
     manual: "ручная передача"
   };
