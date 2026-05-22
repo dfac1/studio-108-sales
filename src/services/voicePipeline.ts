@@ -21,6 +21,22 @@ const THINKING_DELAY_OVERRIDE = process.env.THINKING_DELAY_MS_OVERRIDE !== undef
   ? Math.max(0, Number(process.env.THINKING_DELAY_MS_OVERRIDE))
   : undefined;
 import { getBackchannelKeyForAction, type BackchannelKey } from "./backchannelService.js";
+
+/** Step → action map. Дублирует STEP_TO_ACTION в salesDialogV2 (там не экспортирован).
+ *  Используется в streaming-режиме чтобы решить какой backchannel воткнуть в `start` event
+ *  ДО того как LLM решит next-step. Берём action ТЕКУЩЕГО шага (что user только что ответил). */
+const STEP_TO_ACTION_FOR_BC: Record<string, string> = {
+  ask_name: "ask_name",
+  ask_learner: "ask_learner",
+  ask_age: "ask_age",
+  ask_direction: "ask_need",
+  ask_branch: "ask_branch",
+  offer_slot: "offer_solution",
+  ask_phone: "ask_phone",
+  ask_consent: "ask_consent",
+  booked: "booked",
+  handoff: "handoff"
+};
 import { findPreGeneratedReply } from "./preGeneratedReplies.js";
 import { logConversationTurn, nextConversationId } from "./conversationLog.js";
 import { stripAudioTagsForChat } from "./russianSpeech.js";
@@ -96,9 +112,13 @@ function pickThinkingDelayMs(action: string, message: string): number {
 }
 
 export interface VoiceTurnStreamCallbacks {
-  /** Эмитится один раз, до похода в LLM — несёт meta (conversationId, turnIndex, currentStep).
-   *  Используется turn-stream роутом чтобы клиент мог сразу начать показывать UI. */
-  onStart?: (meta: { conversationId: string; turnIndex: number; currentStep: string }) => void;
+  /** Эмитится один раз, до похода в LLM — несёт meta (conversationId, turnIndex, currentStep,
+   *  backchannel hint). Клиент может предварительно проиграть backchannel mp3 ДО первого
+   *  TTS-предложения, чтобы голос ассистента казался живее.
+   *  ВАЖНО: решение про backchannel принимается СЕРВЕРОМ, не клиентом — потому что
+   *  тот же event консьюмит и браузер, и (в будущем) telephony-агент. У них разная
+   *  механика воспроизведения, но логика «играть/не играть/какой именно» — одна. */
+  onStart?: (meta: { conversationId: string; turnIndex: number; currentStep: string; backchannel: BackchannelKey | null }) => void;
   /** Эмитится для каждого законченного предложения из LLM-стрима. Пропускается мимо
    *  на детерминированных путях (consent finalize, phone accumulator, fallback) — там
    *  весь reply придёт в финальном событии. */
@@ -110,10 +130,21 @@ export async function handleVoiceTurn(input: VoiceTurnInput, callbacks?: VoiceTu
   const conversationId = nextConversationId(input.state);
   const turnIndex = (input.state?.turnIndex ?? 0) + 1;
 
+  const currentStep = (input.state?.stage as string) ?? "ask_name";
+  // Backchannel для streaming-режима: смотрим действие текущего шага и решаем по той же
+  // логике что non-stream pipeline (см. getBackchannelKeyForAction). Skip на turn 1 —
+  // бот ещё ничего не услышал, «поняла» перед приветствием абсурдно.
+  let startBackchannel: BackchannelKey | null = null;
+  if (turnIndex >= 2) {
+    const actionForBc = STEP_TO_ACTION_FOR_BC[currentStep] ?? "ask_need";
+    startBackchannel = getBackchannelKeyForAction(actionForBc, input.message);
+  }
+
   callbacks?.onStart?.({
     conversationId,
     turnIndex,
-    currentStep: (input.state?.stage as string) ?? "ask_name",
+    currentStep,
+    backchannel: startBackchannel,
   });
 
   const dialogInput: SalesDialogInput = {

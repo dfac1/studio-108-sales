@@ -248,6 +248,37 @@ async function runStreamingTurn(message, signal) {
     }
   }
 
+  // Кладёт backchannel mp3 в общую очередь воспроизведения как первый entry.
+  // Грузит /audio/backchannels/<name>.mp3 байтами и пушит в тот же pendingSentences
+  // как обычное «предложение» — drain() проигрывает их строго в порядке добавления.
+  // Если fetch упадёт — entry.done=true, drain пропускает, TTS играет как раньше.
+  function dispatchBackchannelMp3(name) {
+    const entry = { chunks: [], done: false };
+    pendingSentences.push(entry);
+    const p = (async () => {
+      if (!supportsMse) { entry.done = true; return; }
+      await ensureMediaSource();
+      try {
+        const resp = await fetch(`/audio/backchannels/${name}.mp3`, { signal: controller.signal });
+        if (!resp.ok || !resp.body) { entry.done = true; drain(); return; }
+        const reader = resp.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          entry.chunks.push(value);
+          drain();
+        }
+        entry.done = true;
+        drain();
+      } catch (err) {
+        if (err?.name !== "AbortError") console.warn("backchannel fetch failed", err);
+        entry.done = true;
+        drain();
+      }
+    })();
+    sentencePromises.push(p);
+  }
+
   function dispatchSentenceTts(sentenceText) {
     const entry = { chunks: [], done: false };
     pendingSentences.push(entry);
@@ -312,6 +343,13 @@ async function runStreamingTurn(message, signal) {
       try { evt = JSON.parse(line); } catch { continue; }
       if (evt.type === "start") {
         currentStep = evt.currentStep || currentStep;
+        // Option C: backchannel mp3 ставим в очередь ДО первого sentence-TTS.
+        // Сервер сам решает играть/не играть/какой именно (та же логика что non-stream
+        // pipeline). MediaSource sourceBuffer строго FIFO — никаких наложений,
+        // backchannel доиграет полностью, затем встанет TTS реплики.
+        if (evt.backchannel) {
+          dispatchBackchannelMp3(evt.backchannel);
+        }
       } else if (evt.type === "sentence" && typeof evt.text === "string") {
         dispatchSentenceTts(evt.text);
       } else if (evt.type === "final") {
@@ -863,17 +901,19 @@ function resetActiveListeningForNewTurn() {
 let activeListeningFiredThisUtterance = false;
 
 function scheduleActiveListeningTick() {
-  // Срабатываем ОДИН раз через 3.5–5 сек после начала непрерывной речи.
-  // Раньше 5-7сек — короткие реплики (10-15 сек) никогда не получали угу.
-  // Теперь триггер раньше: на реплике 4-5 сек уже сработает.
-  const delay = 3500 + Math.random() * 1500;
+  // Срабатываем ОДИН раз через 2–3 сек после начала непрерывной речи.
+  // Было 3.5–5 сек — реплики 3-4 сек никогда не получали «угу» и звучали холодно.
+  // 2-3 сек ловит средние реплики, при этом одно-словные ответы («да», «озеро»)
+  // обычно завершаются раньше чем активное слушание стрельнёт.
+  const delay = 2000 + Math.random() * 1000;
   activeListeningTimer = setTimeout(() => {
     activeListeningTimer = 0;
     if (!voice.isSpeaking) return;
     if (voice.ttsPlaying) return;
     if (activeListeningFiredThisUtterance) return;
-    // Не вставляем, если клиент только что начал говорить (меньше 3 сек).
-    if (voice.speechStartedAt && performance.now() - voice.speechStartedAt < 3000) {
+    // Не вставляем, если клиент только что начал говорить (меньше 1.5 сек).
+    // Было 3000мс — слишком строго после понижения базового delay'а до 2 сек.
+    if (voice.speechStartedAt && performance.now() - voice.speechStartedAt < 1500) {
       // Перепланируем — следующий тик попробует позже.
       scheduleActiveListeningTick();
       return;
