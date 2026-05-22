@@ -242,6 +242,27 @@ function pickAvailableSlots(state: SalesDialogState): { slots: Slot[]; asAvailab
   return { slots, asAvailable };
 }
 
+/** Попытка найти слоты на ТЕКУЩЕМ филиале, иначе на других. Возвращает alternateBranch
+ *  если найдены на другом филиале — серверная подсказка для prompt'а. */
+function pickSlotsWithBranchFallback(state: SalesDialogState): { slots: Slot[]; asAvailable: AvailableSlot[]; alternateBranch?: Branch } {
+  const original = pickAvailableSlots(state);
+  if (original.slots.length > 0) return original;
+  if (!state.direction || !state.branch) return original;
+  // Пробуем другие филиалы — если на основном нет слотов по направлению (например
+  // «Контемп на Школьной» пусто), сразу видим где есть, чтобы предложить переключение
+  // вместо leak'а «слоты не загружены» и преждевременного handoff'а.
+  const ALL_BRANCHES: Branch[] = ["Развилка", "Озеро", "Школьная"];
+  for (const altBranch of ALL_BRANCHES) {
+    if (altBranch === state.branch) continue;
+    const altState = { ...state, branch: altBranch };
+    const altPicked = pickAvailableSlots(altState);
+    if (altPicked.slots.length > 0) {
+      return { ...altPicked, alternateBranch: altBranch };
+    }
+  }
+  return original;
+}
+
 /** Fallback-реплика когда Anthropic не настроен или сломан. */
 function fallbackReply(step: StepId, state: SalesDialogState): string {
   const name = state.customerName ? `${state.customerName}, ` : "";
@@ -281,10 +302,39 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
   // Для offer_slot: подаём в контекст список доступных слотов из БД.
   let availableSlots: AvailableSlot[] | undefined;
   let foundSlots: Slot[] = [];
+  let slotAlternateBranch: Branch | undefined;
   if (step === "offer_slot") {
-    const picked = pickAvailableSlots(incoming);
+    const picked = pickSlotsWithBranchFallback(incoming);
     foundSlots = picked.slots;
     availableSlots = picked.asAvailable;
+    slotAlternateBranch = picked.alternateBranch;
+
+    // Bug B fix: если слотов нет НИГДЕ (ни на выбранном филиале, ни на других),
+    // НЕ зовём LLM — она склонна leak'нуть «не загружены»/«в системе нет» наружу.
+    // Сразу отправляем в handoff с осмысленной фразой.
+    if (foundSlots.length === 0 && incoming.direction && incoming.branch) {
+      const name = incoming.customerName ? `${incoming.customerName}, ` : "";
+      const dirSpoken = directionForSpeech(incoming.direction);
+      const handoffReply = `${name}по направлению ${dirSpoken} сейчас групп нет в наличии. Передам заявку администратору — он подберёт расписание и свяжется с вами в ближайшее время.`;
+      try {
+        await recordHandoff({ reason: "no_slots", state: incoming, lastUserText: input.message });
+      } catch (err) {
+        console.error("[salesDialogV2] handoff log failed (no slots anywhere):", err instanceof Error ? err.message : err);
+      }
+      console.warn(JSON.stringify({
+        tag: "guard",
+        reason: "no_slots_anywhere",
+        direction: incoming.direction,
+        branch: incoming.branch,
+        age: incoming.age,
+      }));
+      return {
+        reply: handoffReply,
+        state: { ...incoming, stage: "handoff" },
+        action: "handoff",
+        brainSource: "v2_no_slots_handoff",
+      };
+    }
   }
 
   // Детерминированный путь для ask_consent — если телефон уже собран и клиент сказал «да/нет»,
@@ -426,7 +476,13 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
   const directionsHint = step === "ask_direction"
     ? `\n\nДОСТУПНЫЕ НАПРАВЛЕНИЯ И ВОЗРАСТНЫЕ ОКНА (из расписания):\n${directionAgeWindowSummary(incoming.age)}\n\nКРИТИЧНО: предлагай ТОЛЬКО направления с пометкой «✓ ПОДХОДИТ». Никогда не предлагай направление с «✗ НЕ подходит» — у нас просто нет такой группы для этого возраста.\n`
     : "";
-  const systemPrompt = buildStepPrompt(step, context, availableSlots) + phoneBufferHint(incoming) + directionsHint;
+  // Bug B fix: если слоты подгружены с ДРУГОГО филиала (на запрошенном пусто),
+  // явно говорим LLM что нужно мягко предложить переключение. Иначе LLM видит слоты
+  // и не понимает что они не с запрошенного клиентом филиала — leak про «контекст».
+  const branchSwapHint = (step === "offer_slot" && slotAlternateBranch && incoming.branch)
+    ? `\n\nВНИМАНИЕ: на филиале «${incoming.branch}» по направлению «${incoming.direction}» сейчас нет групп. Слоты выше — с филиала «${slotAlternateBranch}». В реплике скажи клиенту мягко: «на филиале <выбранный> сейчас групп нет, но на филиале <${slotAlternateBranch}> есть <день в время>, попробуем?». Если клиент согласится — ставь маркер [→same:{"branch":"${slotAlternateBranch}"}] и предложи слот. НИКОГДА не упоминай «система», «контекст», «не загружены», «база» — это внутренние детали, не для клиента.\n`
+    : "";
+  const systemPrompt = buildStepPrompt(step, context, availableSlots) + phoneBufferHint(incoming) + directionsHint + branchSwapHint;
   const userMessage = input.message?.trim() || "(клиент молчит)";
 
   // История разговора — без неё LLM забывает что только что предложил.
@@ -482,10 +538,17 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
                   preview: sentence.slice(0, 60),
                 }));
               }
-              // Прокидываем sentence наружу (для турн-стрим NDJSON роута).
-              // Любой throw из callback'а проглатываем — стрим LLM не должен падать
-              // из-за того, что клиент отвалился от NDJSON.
-              try { callbacks?.onSentence?.(sentence, idx); } catch { /* ignore */ }
+              // Bug A fix: пропускаем sentence через cleanHumanReply ПЕРЕД отправкой
+              // клиенту. Иначе TTS играет «понял» / «согласен» (мужской 1sg от Claude),
+              // а для женского голоса Анны должно быть «поняла» / «согласна».
+              // В non-streaming пути cleanHumanReply применялся к full reply, в streaming
+              // нужен per-sentence чтобы каждый chunk TTS получил исправленную форму.
+              // Прокидываем дальше; throw в callback'е проглатываем — стрим LLM не должен
+              // падать из-за того, что клиент отвалился от NDJSON.
+              const cleaned = cleanHumanReply(sentence);
+              if (cleaned.trim()) {
+                try { callbacks?.onSentence?.(cleaned, idx); } catch { /* ignore */ }
+              }
             },
           })
         : await callAnthropicText({
@@ -638,9 +701,11 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
             timeoutMs: config.anthropic.dialogTimeoutMs,
             cacheTtl: config.anthropic.cacheTtl,
             onSentence: (sentence, idx) => {
-              // Прокидываем sentence-event клиенту, чтобы он добавил TTS этого
-              // предложения В ОЧЕРЕДЬ за уже играющим первым вызовом.
-              try { callbacks!.onSentence!(sentence, idx); } catch { /* ignore */ }
+              // Bug A fix: тот же gender-flip per-sentence что в основном вызове.
+              const cleaned = cleanHumanReply(sentence);
+              if (cleaned.trim()) {
+                try { callbacks!.onSentence!(cleaned, idx); } catch { /* ignore */ }
+              }
             },
           })
         : await callAnthropicText({
