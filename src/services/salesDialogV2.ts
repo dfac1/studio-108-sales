@@ -412,13 +412,14 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
   let llmReply = "";
   let brainSource = "v2_anthropic";
   let brainCache: SalesDialogResult["brainCache"];
+  // hoist'нуто наружу try чтобы catch видел — нужно для решения retry на non-stream endpoint.
+  const streamingMode = USE_LLM_STREAMING || Boolean(callbacks?.onSentence);
 
   if (isAnthropicConfigured()) {
     try {
       let firstTokenMs = 0;
       let firstSentenceMs = 0;
       const callStart = Date.now();
-      const streamingMode = USE_LLM_STREAMING || Boolean(callbacks?.onSentence);
       const result = streamingMode
         ? await callAnthropicTextStream({
             model: config.anthropic.dialogModel,
@@ -489,9 +490,51 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
         cacheCreate: result.cacheCreationInputTokens,
       }));
     } catch (err) {
-      console.error("[salesDialogV2] anthropic call failed:", err instanceof Error ? err.message : err);
-      llmReply = fallbackReply(step, incoming);
-      brainSource = "v2_fallback_anthropic_error";
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("[salesDialogV2] anthropic call failed:", errMsg);
+      // Если стрим упал на overloaded/rate-limit/5xx — пробуем non-streaming endpoint.
+      // У Anthropic streaming и обычный messages endpoint иногда имеют отдельные
+      // capacity-квоты: один может быть в перегрузке, второй — нет. Это второй
+      // шанс прежде чем падать в детерминированный fallbackReply.
+      const looksTransient = /overloaded|rate.?limit|too.?many|status\s+(429|5\d\d)|stream\s+error|empty body/i.test(errMsg);
+      let retried = false;
+      if (looksTransient && streamingMode) {
+        try {
+          const r2 = await callAnthropicText({
+            model: config.anthropic.dialogModel,
+            system: systemPrompt,
+            history,
+            user: userMessage,
+            maxTokens: 500,
+            temperature: 0.7,
+            timeoutMs: config.anthropic.dialogTimeoutMs,
+            cacheTtl: config.anthropic.cacheTtl,
+          });
+          llmReply = r2.text;
+          brainCache = {
+            inputTokens: r2.inputTokens,
+            outputTokens: r2.outputTokens,
+            cacheCreationInputTokens: r2.cacheCreationInputTokens,
+            cacheReadInputTokens: r2.cacheReadInputTokens,
+          };
+          brainSource = "v2_anthropic_nonstream_retry";
+          retried = true;
+          console.log(JSON.stringify({
+            tag: "perf",
+            stage: "llm_nonstream_retry",
+            step,
+            ms: r2.latencyMs,
+            inTok: r2.inputTokens,
+            outTok: r2.outputTokens,
+          }));
+        } catch (err2) {
+          console.error("[salesDialogV2] non-stream retry also failed:", err2 instanceof Error ? err2.message : err2);
+        }
+      }
+      if (!retried) {
+        llmReply = fallbackReply(step, incoming);
+        brainSource = looksTransient ? "v2_fallback_anthropic_overload" : "v2_fallback_anthropic_error";
+      }
     }
   } else {
     llmReply = fallbackReply(step, incoming);
