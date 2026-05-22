@@ -503,6 +503,15 @@ export async function handleSalesDialogV2(input: SalesDialogInput, callbacks?: S
   // Чистим: маркер + нормализуем мужские формы на женские («понял» → «поняла»).
   let cleanReply = cleanHumanReply(stripTransitionMarker(llmReply));
 
+  // Защита: если LLM вернула только маркер (без текста реплики), cleanReply пустой
+  // и клиент слышит тишину. Падаем в fallback для текущего шага. transition (если был)
+  // оставляем — контекст-апдейт продолжит применяться, чтобы извлечённые факты не потерять.
+  if (!cleanReply.trim()) {
+    console.warn(JSON.stringify({ tag: "guard", reason: "empty_reply_after_strip", step, brainSource, hadMarker: Boolean(transition) }));
+    cleanReply = cleanHumanReply(fallbackReply(step, incoming));
+    if (brainSource === "v2_anthropic") brainSource = "v2_fallback_empty_reply";
+  }
+
   // Применяем contextUpdate.
   let nextState: SalesDialogState = { ...incoming };
   if (transition?.contextUpdate) {

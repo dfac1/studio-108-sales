@@ -160,6 +160,7 @@ export async function callAnthropicTextStream(req: AnthropicStreamRequest): Prom
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), req.timeoutMs ?? config.anthropic.dialogTimeoutMs);
+  let eventsSeen = 0;
 
   try {
     const response = await fetch(ANTHROPIC_URL, {
@@ -191,16 +192,27 @@ export async function callAnthropicTextStream(req: AnthropicStreamRequest): Prom
     const decoder = new TextDecoder();
     let buf = "";
 
+    // SSE-разделитель события: формально \n\n, но некоторые прокси/CDN склонны
+    // подкидывать CRLF — на всякий случай нормализуем CR в LF перед split'ом.
+    const findEventEnd = (s: string): number => {
+      const a = s.indexOf("\n\n");
+      const b = s.indexOf("\r\n\r\n");
+      if (a === -1) return b === -1 ? -1 : b;
+      if (b === -1) return a;
+      return Math.min(a, b);
+    };
+    const eventEndLen = (s: string, pos: number): number => (s.substr(pos, 4) === "\r\n\r\n" ? 4 : 2);
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
 
       let eventEnd: number;
-      while ((eventEnd = buf.indexOf("\n\n")) !== -1) {
+      while ((eventEnd = findEventEnd(buf)) !== -1) {
         const raw = buf.slice(0, eventEnd);
-        buf = buf.slice(eventEnd + 2);
-        const dataLine = raw.split("\n").find((l) => l.startsWith("data: "));
+        buf = buf.slice(eventEnd + eventEndLen(buf, eventEnd));
+        const dataLine = raw.split(/\r?\n/).find((l) => l.startsWith("data: "));
         if (!dataLine) continue;
         const dataStr = dataLine.slice(6).trim();
         if (!dataStr || dataStr === "[DONE]") continue;
@@ -210,12 +222,14 @@ export async function callAnthropicTextStream(req: AnthropicStreamRequest): Prom
           delta?: { type?: string; text?: string };
           message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } };
           usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number };
+          error?: { type?: string; message?: string };
         };
         try {
           event = JSON.parse(dataStr);
         } catch {
           continue;
         }
+        eventsSeen++;
 
         if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && typeof event.delta.text === "string") {
           const piece = event.delta.text;
@@ -245,6 +259,12 @@ export async function callAnthropicTextStream(req: AnthropicStreamRequest): Prom
           usage.cacheReadInputTokens = event.message.usage.cache_read_input_tokens ?? 0;
         } else if (event.type === "message_delta" && event.usage) {
           usage.outputTokens = event.usage.output_tokens ?? usage.outputTokens;
+        } else if (event.type === "error") {
+          // Anthropic документирует SSE-событие error для overload/rate-limit мидстримом.
+          // Раньше парсер молча игнорировал — итогом был пустой reply и «мёртвый бот».
+          const errType = event.error?.type ?? "unknown";
+          const errMsg = event.error?.message ?? "anthropic stream error";
+          throw new Error(`Anthropic stream error (${errType}): ${errMsg}`);
         }
       }
     }
@@ -253,6 +273,13 @@ export async function callAnthropicTextStream(req: AnthropicStreamRequest): Prom
     const tail = pending.trim();
     if (tail && !tail.includes("[→")) {
       try { req.onSentence?.(tail, sentenceIndex); } catch { /* ignore */ }
+    }
+
+    // Защита от «пустого стрима»: Render↔Anthropic иногда обрывает соединение до
+    // первого токена (видели inTok=0, outTok=0, reply=""). Throw — пусть caller
+    // в salesDialogV2 свалится в fallbackReply вместо тишины.
+    if (!fullText.trim()) {
+      throw new Error(`Anthropic stream returned empty body (events=${eventsSeen})`);
     }
 
     return {
